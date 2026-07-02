@@ -20,8 +20,10 @@ haphic 利用 Hi-C reads 进行挂载（还得看一下效果如何）
 
 
 import argparse
-import os
-import subprocess
+import sys
+from pathlib import Path
+
+from phap_core.runner import PreflightError, require_input_files, run_command
 
 
 def parse_args():
@@ -48,32 +50,68 @@ def parse_args():
 def main():
     args = parse_args()
 
-    script_realpath = os.path.dirname(os.path.realpath(__file__))
-    utils_realpath = os.path.join(script_realpath, '..', 'utils')
-
-    cwd = os.getcwd()       # current working dir
+    cwd = Path.cwd()
+    group_file = (
+        Path(args.group).expanduser().resolve()
+        if args.group
+        else cwd / '02.cluster' / '05.rescue' / 'group.reassignment.cluster.txt'
+    )
+    input_paths = [
+        args.bam_hifi,
+        args.bam_hic,
+        args.bam_ont,
+        args.contig_type,
+        group_file,
+        args.hifi,
+        args.ont,
+        args.hic1,
+        args.hic2,
+    ]
+    try:
+        require_input_files(input_paths)
+    except PreflightError as error:
+        raise SystemExit(f"phap phase_reads: error: {error}") from error
 
     ### Step 1: p_utg vs mT2T
-    step1_dir = os.path.join(cwd, '03.phase_reads')
-    os.makedirs(step1_dir, exist_ok=True)
-    os.chdir(step1_dir)
-    cmd = (f'python {utils_realpath}/phase_reads_assemble_anchor.py '
-           f'--bam_hifi {args.bam_hifi} '
-           f'--bam_hic {args.bam_hic} '
-           f'--bam_ont {args.bam_ont} '
-           f'--contig_type {args.contig_type} '
-           f'--group {cwd}/02.cluster/05.rescue/group.reassignment.cluster.txt '
-           f'--hifi {args.hifi} '
-           f'--ont {args.ont} '
-           f'--ont_length {args.ont_length} '
-           f'--ont_quality {args.ont_quality} '
-           f'--hic1 {args.hic1} '
-           f'--hic2 {args.hic2} '
-           f'--threads {args.threads} '
-           f'--process {args.process} '
-           f'--seed {args.seed} '
-           f'> log_phase_reads_assemble_anchor_out 2> log_phase_reads_assemble_anchor_err')
-    subprocess.run(cmd, shell=True, check=True)
+    step1_dir = cwd / '03.phase_reads'
+    step1_dir.mkdir(parents=True, exist_ok=True)
+    command = [
+        sys.executable,
+        '-m',
+        'utils.phase_reads_assemble_anchor',
+        '--bam_hifi',
+        str(Path(args.bam_hifi).expanduser().resolve()),
+        '--bam_hic',
+        str(Path(args.bam_hic).expanduser().resolve()),
+        '--bam_ont',
+        str(Path(args.bam_ont).expanduser().resolve()),
+        '--contig_type',
+        str(Path(args.contig_type).expanduser().resolve()),
+        '--group',
+        str(group_file),
+        '--hifi',
+        str(Path(args.hifi).expanduser().resolve()),
+        '--ont',
+        str(Path(args.ont).expanduser().resolve()),
+        '--ont_length',
+        str(args.ont_length),
+        '--ont_quality',
+        str(args.ont_quality),
+        '--hic1',
+        str(Path(args.hic1).expanduser().resolve()),
+        '--hic2',
+        str(Path(args.hic2).expanduser().resolve()),
+        '--threads',
+        str(args.threads),
+        '--process',
+        str(args.process),
+        '--seed',
+        str(args.seed),
+    ]
+    with (step1_dir / 'log_phase_reads_assemble_anchor_out').open('w') as stdout, (
+        step1_dir / 'log_phase_reads_assemble_anchor_err'
+    ).open('w') as stderr:
+        run_command(command, cwd=step1_dir, stdout=stdout, stderr=stderr)
 
 
 if __name__ == '__main__':

@@ -53,18 +53,23 @@ To do:
 
 
 import argparse
+import glob
+import os
 import pickle
+import shlex
 import subprocess
 import sys
 from collections import defaultdict
+from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import os
+from phap_core.runner import (
+    PreflightError,
+    require_input_files,
+    require_tools,
+    run_command,
+)
 
-import glob
-
-from util import *
+from .util import fasta_read, run_in_parallel
 
 
 ## 解析 FASTA: ctg: [seq, seq length, RE site's count]
@@ -173,6 +178,8 @@ def get_link_list(dic_pair_hic):
 
 
 def parse_contig_type(file_contig_type):
+    import pandas as pd
+
     df = pd.read_csv(file_contig_type, delim_whitespace=True)
     dic_contig_type = dict(zip(df['contig_ID'], df['contig_type']))
     return dic_contig_type
@@ -658,14 +665,14 @@ def cluster(fasta, full_links, flank, contig_type, allelic_table_file, wd):
     fa_dict = parse_fasta(fasta, flank)
     dic_contig_type = parse_contig_type(contig_type)
     full_link_dict, sorted_ctg_list, RE_site_dict = parse_pickle(fa_dict, full_links, dic_contig_type)
-    out = open('full.links.txt', 'w')
+    out = open(os.path.join(wd, 'full.links.txt'), 'w')
     for key, value in full_link_dict.items():
         out.write(str(key) + '\t' + str(value) + '\n')
     out.close()
 
     ### step1: 解析获得 unitig flank Hi-C links
     dic_pair_hic = load_pickle_file(full_links)
-    out = open('flank.links.txt', 'w')
+    out = open(os.path.join(wd, 'flank.links.txt'), 'w')
     for key, value in dic_pair_hic.items():
         out.write(str(key) + '\t' + str(value) + '\n')
         # print(key, value)
@@ -691,12 +698,13 @@ def cluster(fasta, full_links, flank, contig_type, allelic_table_file, wd):
     list_to_file(g2, f'{wd}/g2.txt')
     list_to_file(g3, f'{wd}/g3.txt')
     list_to_file(g4, f'{wd}/g4.txt')
-    if os.path.exists('group.cluster.txt'):
-        os.remove('group.cluster.txt')
-    list_to_cluster_file(g1, 'group1')
-    list_to_cluster_file(g2, 'group2')
-    list_to_cluster_file(g3, 'group3')
-    list_to_cluster_file(g4, 'group4')
+    group_cluster_file = os.path.join(wd, 'group.cluster.txt')
+    if os.path.exists(group_cluster_file):
+        os.remove(group_cluster_file)
+    list_to_cluster_file(g1, 'group1', group_cluster_file)
+    list_to_cluster_file(g2, 'group2', group_cluster_file)
+    list_to_cluster_file(g3, 'group3', group_cluster_file)
+    list_to_cluster_file(g4, 'group4', group_cluster_file)
     output_fa_from_list(g1, dic_fasta, f'{wd}/g1.fa')
     output_fa_from_list(g2, dic_fasta, f'{wd}/g2.fa')
     output_fa_from_list(g3, dic_fasta, f'{wd}/g3.fa')
@@ -704,12 +712,13 @@ def cluster(fasta, full_links, flank, contig_type, allelic_table_file, wd):
     # note: 这里的g1, g2, g3, g4已经更改了，末尾添加了' '
     write_combined_genotypes_to_file(g1, g2, g3, g4, f'{wd}/g1g2g3g4.txt')
     ## merge g1+g2+g3+g4
-    if os.path.exists('g1g2g3g4.fa'):
-        os.remove('g1g2g3g4.fa')
-    rename_id(f'{wd}/g1.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g2.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g3.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g4.fa', f'{wd}/g1g2g3g4.fa')
+    merged_fasta = os.path.join(wd, 'g1g2g3g4.fa')
+    if os.path.exists(merged_fasta):
+        os.remove(merged_fasta)
+    rename_id(f'{wd}/g1.fa', merged_fasta)
+    rename_id(f'{wd}/g2.fa', merged_fasta)
+    rename_id(f'{wd}/g3.fa', merged_fasta)
+    rename_id(f'{wd}/g4.fa', merged_fasta)
 
 
 def parse_arguments():
@@ -719,6 +728,7 @@ def parse_arguments():
     parser.add_argument('--mT2T', required=True, type=str, help='Path to mT2T file or reference genome')
     parser.add_argument('--contig_type', required=True, type=str, help='Path to contig type from dosage analysis')
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
+    parser.add_argument('--process', type=int, default=12, help='Maximum parallel processes [12]')
 
     find_longest = parser.add_argument_group('>>> Parameters for find longest subsequences')
     find_longest.add_argument('--min_align_length', type=int, default=200, help="Minimum alignment length [200]")
@@ -749,8 +759,13 @@ def parse_arguments():
 def main():
     args = parse_arguments()
 
-    script_realpath = os.path.dirname(os.path.realpath(__file__))
-    utils_realpath = os.path.join(script_realpath, '..', 'utils')
+    try:
+        require_input_files(
+            [args.p_utg, args.mT2T, args.contig_type, args.full_links, args.clm]
+        )
+        require_tools(["minimap2", "sort"])
+    except PreflightError as error:
+        raise SystemExit(f"phap cluster: error: {error}") from error
 
     cwd = os.getcwd()       # current working dir
 
@@ -768,20 +783,30 @@ def main():
     try:
         # Minimap2 alignment
         if not os.path.exists(paf_file):
-            subprocess.run( ' '.join([
-                'minimap2', '-cx', 'asm5', '-t', str(args.threads), args.mT2T, args.p_utg,
-                '>', paf_file
-            ]), shell=True, check=True)
+            with open(paf_file, 'w') as output:
+                run_command(
+                    [
+                        'minimap2',
+                        '-cx',
+                        'asm5',
+                        '-t',
+                        str(args.threads),
+                        args.mT2T,
+                        args.p_utg,
+                    ],
+                    stdout=output,
+                )
 
         # Sort PAF file
-        subprocess.run(' '.join([
-            'sort', '-k1,1', '-k6,6', '-k8,8n', paf_file,
-            '>', sorted_paf_file
-        ]), shell=True, check=True)
+        with open(sorted_paf_file, 'w') as output:
+            run_command(
+                ['sort', '-k1,1', '-k6,6', '-k8,8n', paf_file],
+                stdout=output,
+            )
 
         # Find the longest subsequence
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'find_longest_subsequence.py'),
+        run_command([
+            sys.executable, '-m', 'utils.find_longest_subsequence',
             '--paf', sorted_paf_file,
             '--min_alignment_distance', str(args.min_alignment_distance),
             '--min_align_length', str(args.min_align_length),
@@ -789,36 +814,39 @@ def main():
             '--best_lis_output', best_paf_file,
             '--min_match_ratio', str(args.min_match_ratio),
             '--min_lis_size', str(args.min_lis_size),
+            '--min_lis_length', str(args.min_lis_length),
             '--max_lis_distance', str(args.max_lis_distance)
-        ]), shell=True, check=True)
+        ])
 
         # Generate allelic table
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'allelic_table_generate.py'),
+        run_command([
+            sys.executable, '-m', 'utils.allelic_table_generate',
             '--paf_file', best_paf_file,
             '--bin_size', str(args.bin_size),
+            '--top_n', str(args.top_n),
             '--chr_num', str(args.chr_num),
             '--contig_type', args.contig_type,
             '--out_top_contigs_per_bin', top_contigs_file,
             '--out_allelic_table', allelic_table_file
-        ]), shell=True, check=True)
+        ])
 
         # Sort allelic table
-        subprocess.run(' '.join([
-            'sort', '-k1,1', '-k2,2n', allelic_table_file,
-            '>', allelic_table_sorted
-        ]), shell=True, check=True)
+        with open(allelic_table_sorted, 'w') as output:
+            run_command(
+                ['sort', '-k1,1', '-k2,2n', allelic_table_file],
+                stdout=output,
+            )
 
         # Refresh allelic table
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'allelic_table_refresh.py'),
+        run_command([
+            sys.executable, '-m', 'utils.allelic_table_refresh',
             '--wd', step1_dir,
             '--allelic_table', allelic_table_sorted,
             '--fasta', args.p_utg,
             '--contig_type', args.contig_type,
             '--top_n', str(args.top_n),
             '--search_range', str(args.search_range)
-        ]), shell=True, check=True)
+        ])
 
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}", file=sys.stderr)
@@ -828,14 +856,13 @@ def main():
     step2_dir = os.path.join(cwd, '02.cluster', '02.chr_seq')
     os.makedirs(step2_dir, exist_ok=True)
     try:
-        cmd = ' '.join([
-            os.path.join(utils_realpath, 'extract_chr_from_putg.py'),
+        run_command([
+            sys.executable, '-m', 'utils.extract_chr_from_putg',
             '--p_utg', args.p_utg,
             '--paf', best_paf_file,
             '--wd', step2_dir,
             '--chr_num', str(args.chr_num)
         ])
-        subprocess.run(cmd, shell=True, check=True)
 
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}", file=sys.stderr)
@@ -845,7 +872,7 @@ def main():
     step3_dir = os.path.join(cwd, '02.cluster', '03.cluster')
     os.makedirs(step3_dir, exist_ok=True)
     # 待聚类的染色体文件列表
-    file_list = glob.glob(os.path.join(step2_dir, '*putg.fa'))
+    file_list = sorted(glob.glob(os.path.join(step2_dir, '*putg.fa')))
     print(f'Debugs: file_list {file_list}')
 
     for file in file_list:
@@ -854,14 +881,16 @@ def main():
         # 聚类
         cluster_chr_dir = os.path.join(step3_dir, chr)
         os.makedirs(cluster_chr_dir, exist_ok=True)
-        os.chdir(cluster_chr_dir)
-        cmd = f'grep {chr} {cwd}/02.cluster/01.putg_vs_mT2T/corrected_allelic_table.txt > {chr}.corrected_allelic_table.txt'
-        check_file_in_path(f'{chr}.corrected_allelic_table.txt', cmd)
-        # subprocess.run(cmd, shell=True, check=True)
-        allelic_table_chr = f'{chr}.corrected_allelic_table.txt'
+        allelic_table_chr = os.path.join(
+            cluster_chr_dir, f'{chr}.corrected_allelic_table.txt'
+        )
+        if not os.path.exists(allelic_table_chr):
+            corrected_table = os.path.join(step1_dir, 'corrected_allelic_table.txt')
+            with open(corrected_table) as source, open(allelic_table_chr, 'w') as output:
+                for line in source:
+                    if line.split('\t', 1)[0] == chr:
+                        output.write(line)
         cluster(file, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
-        # cluster(args.p_utg, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
-    os.chdir(cwd)
 
     ### step4: Re-cluster unclustered unitig
     commands = []
@@ -872,30 +901,54 @@ def main():
         chr = file_bn.replace('.putg.fa', '')
         recluster_chr_dir = os.path.join(step4_dir, chr)
         os.makedirs(recluster_chr_dir, exist_ok=True)
-        # os.chdir(recluster_chr_dir)
-        cmd = (f'cd {recluster_chr_dir}; {utils_realpath}/chr_uncluster_recluster.py --fasta {file} --contig_type {args.contig_type} '
-               f'--full_links {args.full_links} --clusters_file {step3_dir}/{chr}/group.cluster.txt --clm_file {args.clm} > log_re_out 2> log_re_err')
+        command = [
+            sys.executable, '-m', 'utils.chr_uncluster_recluster',
+            '--fasta', file,
+            '--contig_type', args.contig_type,
+            '--full_links', args.full_links,
+            '--clusters_file', os.path.join(step3_dir, chr, 'group.cluster.txt'),
+            '--clm_file', args.clm,
+        ]
+        cmd = (
+            f"cd {shlex.quote(recluster_chr_dir)} && {shlex.join(command)} "
+            "> log_re_out 2> log_re_err"
+        )
         commands.append(cmd)
-    run_in_parallel(commands, 12)
-    os.chdir(cwd)
+    run_in_parallel(commands, args.process)
 
     ### step5: rescue: 与 mT2T 未比对的 unitigs，被拯救
     step5_dir = os.path.join(cwd, '02.cluster', '05.rescue')
     os.makedirs(step5_dir, exist_ok=True)
-    os.chdir(step5_dir)
     # 生成总的 merge.group.reassignment.cluster.txt
-    recluster_cluster_file_list = glob.glob(os.path.join(step4_dir, 'chr*', 'group.reassignment.cluster.txt'))
+    recluster_cluster_file_list = sorted(
+        glob.glob(os.path.join(step4_dir, 'chr*', 'group.reassignment.cluster.txt'))
+    )
     merged_cluster_file = os.path.join(step5_dir, 'merge.group.reassignment.cluster.txt')
-    # 使用 cat 命令合并文件
-    cmd_cat = 'cat ' + ' '.join(recluster_cluster_file_list) + ' > ' + merged_cluster_file
-    subprocess.run(cmd_cat, shell=True, check=True)
+    with open(merged_cluster_file, 'w') as output:
+        for cluster_file in recluster_cluster_file_list:
+            with open(cluster_file) as source:
+                output.write(source.read())
     # 生成总的 un_chr.fa
     file_un_chr_fasta = os.path.join(step2_dir, 'un_chr.fa')
     # rescue
-    cmd_rescue = (f'nohup time -v {utils_realpath}/unchr_recluster.py --draft_fasta {args.p_utg} --fasta {file_un_chr_fasta} '
-                 f'--contig_type {args.contig_type} --full_links {args.full_links} --clusters_file {merged_cluster_file} --clm_file {args.clm} '
-                 f'> log_rescue_out 2> log_rescue_err')
-    subprocess.run(cmd_rescue, shell=True, check=True)
+    rescue_command = [
+        sys.executable, '-m', 'utils.unchr_recluster',
+        '--draft_fasta', args.p_utg,
+        '--fasta', file_un_chr_fasta,
+        '--contig_type', args.contig_type,
+        '--full_links', args.full_links,
+        '--clusters_file', merged_cluster_file,
+        '--clm_file', args.clm,
+    ]
+    with open(os.path.join(step5_dir, 'log_rescue_out'), 'w') as stdout, open(
+        os.path.join(step5_dir, 'log_rescue_err'), 'w'
+    ) as stderr:
+        run_command(
+            rescue_command,
+            cwd=step5_dir,
+            stdout=stdout,
+            stderr=stderr,
+        )
 
 
 if __name__ == '__main__':

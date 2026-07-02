@@ -1,2 +1,3 @@
-__version__ = '1.0.3'
-__update_time__ = '2025.07.14'
+"""Backward-compatible version aliases."""
+
+from phap_core import __update_time__, __version__

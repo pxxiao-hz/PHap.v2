@@ -1,14 +1,15 @@
 #!/usr/bin/env python
 
+import shlex
+import shutil
 import os
-import subprocess
-import multiprocessing
-import time
-import pandas as pd
 from collections import defaultdict
 import re
-from scipy.stats import linregress
-from bisect import bisect_left
+from pathlib import Path
+
+from phap_core.runner import run_shell_command, run_shell_commands_parallel
+
+run_in_parallel = run_shell_commands_parallel
 
 ### 制作文件夹，先判断文件夹是否存在？
 def mkdir(dir):
@@ -17,38 +18,18 @@ def mkdir(dir):
     return None
 
 
-def execute_command(command):
-    '''
-    执行命令
-    :param command:
-    :return:
-    '''
-    process = subprocess.Popen(command, shell=True)
-    process.wait()
-    return None
+def linear_regression_r2(x_values, y_values):
+    """Import scipy lazily so CLI help works before optional modules load."""
+    from scipy.stats import linregress
 
-
-def run_in_parallel(commands, num_processes):
-    '''
-    多线程运行命令
-    :param commands:
-    :param num_processes:
-    :return:
-    '''
-    # processes = []
-    pool = multiprocessing.Pool(processes=num_processes)
-    for command in commands:
-        pool.apply_async(execute_command, args=(command, ))
-    pool.close()
-    pool.join()
-    return None
+    return linregress(x_values, y_values).rvalue ** 2
 
 
 def check_file_in_path(file, cmd):
     if os.path.exists(file):
         print(f'[info] {file} exists, CMD: {cmd}; PASS!')
     else:
-        subprocess.run(cmd, shell=True, close_fds=True)
+        run_shell_command(cmd)
     return None
 
 
@@ -365,6 +346,8 @@ def split_fa(dic_fasta, min_contig_length, wd):
 
 def cal_distance(file_split_set, wd, args):
     ''' contig all_vs_all distance calculate '''
+    import pandas as pd
+
     def run_mash_sketch(file_split_set, wd):
         commands = []
         for file in file_split_set:
@@ -384,9 +367,18 @@ def cal_distance(file_split_set, wd, args):
             for j in range(i + 1, len(file_split_list)):
                 file1 = file_split_list[i]
                 file2 = file_split_list[j]
-                cmd_mash = f'mash dist {file1} {file2} >> {wd}/distances.txt'
+                pair_name = f"{Path(file1).stem}__{Path(file2).stem}.dist"
+                pair_output = Path(wd, pair_name)
+                cmd_mash = (
+                    f"mash dist {shlex.quote(file1)} {shlex.quote(file2)} "
+                    f"> {shlex.quote(str(pair_output))}"
+                )
                 commands.append(cmd_mash)
         run_in_parallel(commands, args.process)
+        with open(f'{wd}/distances.txt', 'w') as merged:
+            for distance_file in sorted(Path(wd).glob('*.dist')):
+                with distance_file.open() as source:
+                    shutil.copyfileobj(source, merged)
 
         ## step3: filter dist
     if not os.path.exists(f'{wd}/similar_contig_pairs.txt'):
@@ -411,8 +403,13 @@ def contig_pair_aln(file_similar_contig_pairs, wd, args):
                 commands.append(cmd_minimap2)
         run_in_parallel(commands, args.process)
         ## merge paf
-        # subprocess.run(f'cat {wd}/*.paf > {wd}/merge.paf', shell=True, close_fds=True)    # Too many files will cause an error
-        subprocess.run(f'find {wd}/*.paf -name "*.paf" -print0 | xargs -0 cat > {wd}/merge.paf')
+        merge_paf = Path(wd, 'merge.paf')
+        with merge_paf.open('w') as merged:
+            for paf_file in sorted(Path(wd).glob('*.paf')):
+                if paf_file == merge_paf:
+                    continue
+                with paf_file.open() as source:
+                    shutil.copyfileobj(source, merged)
 
 
 def find_identity_contig_pair(file_paf):
@@ -534,7 +531,7 @@ def remove_redundancy(merge_paf, wd, dic_contig, args):
                 continue
             qstarts, tstarts = zip(*coords)
             # print(pair, coords)
-            r_squared = linregress(qstarts, tstarts).rvalue ** 2
+            r_squared = linear_regression_r2(qstarts, tstarts)
             print(pair, coords, r_squared)
             r2_flag[pair] = r_squared >= threshold
         return r2_flag
@@ -687,7 +684,7 @@ def remove_redundancy_v2(merge_paf, wd, dic_contig, args):
                 r2_flag[pair] = False
                 continue
             qstarts, tstarts = zip(*coords)
-            r_squared = linregress(qstarts, tstarts).rvalue ** 2
+            r_squared = linear_regression_r2(qstarts, tstarts)
             r2_flag[pair] = r_squared >= threshold
         return r2_flag
 
@@ -771,7 +768,7 @@ def remove_redundancy_v2(merge_paf, wd, dic_contig, args):
 
         def calc_stats(lis):
             q, t = zip(*[(int(l[2]), int(l[7])) for l in lis])
-            r2 = linregress(q, t).rvalue ** 2
+            r2 = linear_regression_r2(q, t)
             return r2, len(lis) / len(records)
 
         lis_inc = get_lis(records, reverse=False)

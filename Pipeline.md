@@ -2,9 +2,13 @@
 1. PacBio HiFi: `potato4.hifi.fastq.gz`
 2. ONT ultra-long: `potato4.nanopore.fastq.gz`
 3. Hi-C: `potato4.hic_1.fq.gz`, `potato4.hic_2.fq.gz`
+
+The examples below assume PHap is installed and the repository path is stored
+in `PHAP_REPO=/path/to/PHap.v2`. All required external executables must be
+available on `PATH`.
 ## 1. Initial assembly
 ```shell
-hifiasm -o potato4.hifi.ont.asm -t64 --ul /home/pxxiao/project/10_potato_poly/02_asm/01_test/01_hifi_ont/00_data/potato4.nanopore.fastq.gz /home/pxxiao/project/10_potato_poly/02_asm/01_test/01_hifi_ont/00_data/potato4.hifi.fastq.gz
+hifiasm -o potato4.hifi.ont.asm -t64 --ul potato4.nanopore.fastq.gz potato4.hifi.fastq.gz
 
 # Two main files are obtained for downstream analysis: primary contig assembly (p_ctg) and phased unitig assembly (p_utg)
 ```
@@ -12,13 +16,13 @@ hifiasm -o potato4.hifi.ont.asm -t64 --ul /home/pxxiao/project/10_potato_poly/02
 * By mapping high accuracy HiFi reads, identify collapsed unitigs based on the alignment depth.
 1. Obtain hifi alignment depth
 ```shell
-px_shell_dosage.sh -g potato4.hifi.ont.asm.bp.p_utg.gfa.fa -i potato4.hifi.fastq.gz
+bash "$PHAP_REPO/shell/px_shell_dosage.sh" -g potato4.hifi.ont.asm.bp.p_utg.gfa.fa -i potato4.hifi.fastq.gz
 ```
 ![|400](https://bioin-1320274504.cos.ap-nanjing.myqcloud.com/images/dosage.win10000.jpg)
 2. Identify unitig type
 * Based on alignment depth, classify unitigs, for example: haplotigs ([0, 45X]), diplotigs ([45X, 74X]), triplotigs ([74X, 103X]), tetraplotigs ([103X, 132X]), and replotigs (>= 132X) for replotigs.
 ```
-python dosage.analysis.contig.type.identified.py --input_file aln.sort.clean.pandepth.win.stat.txt --pandepth
+python "$PHAP_REPO/shell/dosage.analysis.contig.type.identified.py" --input_file aln.sort.clean.pandepth.win.stat.txt --pandepth
 
 # Main file: contig_depth.txt
 ```
@@ -38,20 +42,20 @@ phap mt2t --p_ctg hifiasm.asm.bp.p_ctg.gfa.fa --threads 2 --process 30 --match_r
 * Refer to the Hi-C processing method of [HapHiC](https://github.com/zengxiaofei/HapHiC?tab=readme-ov-file#:~:text=Quick%20start-,Align%20Hi%2DC%20data%20to%20the%20assembly,-First%2C%20you%20need): align Hi-C reads to the *p_utg* assembly to obtain the link information between unitigs.
 1. Mapping Hi-C reads to *p_utg* assembly
 ```shell
-haphic_shell_data-prepare.sh potato4.hifi.ont.asm.bp.p_utg.gfa.fa potato4.hic_1.fq.gz potato4.hic_2.fq.gz
+bash "$PHAP_REPO/shell/haphic_shell_data-prepare.sh" potato4.hifi.ont.asm.bp.p_utg.gfa.fa potato4.hic_1.fq.gz potato4.hic_2.fq.gz
 
 # Main file: HiC.filtered.bam
 ```
 2. Obatain links between unitigs
 ```shell
-python parse.hic.bam.py --bam HiC.filtered.bam --fasta potato4.hifi.ont.asm.bp.p_utg.gfa.fa --flank 500000 --threads 20
+python "$PHAP_REPO/shell/parse.hic.bam.py" --bam HiC.filtered.bam --fasta potato4.hifi.ont.asm.bp.p_utg.gfa.fa --flank 500000 --threads 20
 
 # Main file: full_links.pkl
 ```
 
 ## 5. Allelic unitig table construction, unitigs clustering and re-clustering
 ```shell
-putg=potato4.hifi.ont.asm.bp.p_utg.gfa.fa
+p_utg=potato4.hifi.ont.asm.bp.p_utg.gfa.fa
 threads=36
 mt2t=mT2T.fa
 contig_type=contig_depth.txt
@@ -61,7 +65,7 @@ clm=paired_links.clm
 phap cluster \
         --p_utg $p_utg \
         --threads $threads \
-        --mT2T /$mt2t \
+        --mT2T $mt2t \
         --contig_type $contig_type \
         --top_n 4 \
         --chr_num 12 \
@@ -77,7 +81,7 @@ phap cluster \
 ```shell
 wd=`pwd`
 
-phap phase_reads phase_reads \
+phap phase_reads \
         --bam_hifi $wd/HiFi.clean.bam \
         --bam_hic $wd/HiC.sort.bam \
         --bam_ont $wd/ont.putg.sort.bam \
@@ -85,7 +89,7 @@ phap phase_reads phase_reads \
         --hifi $wd/potato4.hifi.fastq.gz \
         --ont $wd/potato4.nanopore.fastq.gz \
         --hic1 $wd/potato4.hic_1.fq.gz \
-        --hic2 $wd/potato4.hic_1.fq.gz \
+        --hic2 $wd/potato4.hic_2.fq.gz \
         --threads 10 \
         --process 12 \
         --seed 100 \

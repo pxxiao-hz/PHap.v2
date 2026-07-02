@@ -26,50 +26,27 @@ description:
 
 
 import argparse
-import multiprocessing
+import logging
 import os
-import subprocess
 import random
-import pysam
+import shlex
 from collections import defaultdict
 import pickle
-import logging
+
+import pysam
+
+from phap_core.runner import (
+    PreflightError,
+    require_input_files,
+    require_tools,
+    run_shell_command,
+    run_shell_commands_parallel,
+)
+
+run_in_parallel = run_shell_commands_parallel
 
 # 设置日志记录配置
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
-
-
-def execute_command(command, env=None):
-    '''
-    执行命令并处理可能的错误
-    :param command: 要执行的命令字符串
-    :return: None
-    '''
-    try:
-        process = subprocess.Popen(command, shell=True, env=env)
-        process.wait()
-        if process.returncode != 0:
-            logging.error(f'Command failed with return code {process.returncode}: {command}')
-    except Exception as e:
-        logging.error(f'An error occurred while executing command: {command}\nError: {e}')
-    return None
-
-
-def run_in_parallel(commands, num_processes, env=None):
-    '''
-    多线程运行命令
-    :param commands: 要执行的命令列表
-    :param num_processes: 并行执行的进程数
-    :param env: 环境变量字典
-    :return: None
-    '''
-    # processes = []
-    pool = multiprocessing.Pool(processes=num_processes)
-    for command in commands:
-        pool.apply_async(execute_command, args=(command, env, ))
-    pool.close()
-    pool.join()
-    return None
 
 
 def output_pickle(dict_, to):
@@ -176,7 +153,7 @@ def parse_args():
     parser.add_argument('--bam_hic', type=str, required=True, help='Path to Hi-C bam file')
     parser.add_argument('--bam_ont', type=str, required=True, help='Path to ONT bam file')
     parser.add_argument('--contig_type', required=True, type=str, help='Path to contig type from dosage analysis')
-    parser.add_argument('--group', type=str, help='Path to merge group file from cluster, default is /02.cluster/05.rescue/group.reassignment.cluster.txt')
+    parser.add_argument('--group', type=str, required=True, help='Path to group file from cluster')
     parser.add_argument('--hifi', type=str, required=True, help='Path to HiFi reads file')
     parser.add_argument('--ont', type=str, required=True, help='Path to ONT reads file')
     parser.add_argument('--hic1', type=str, required=True, help='Path to Hi-C forward reads file')
@@ -193,6 +170,36 @@ def parse_args():
 
 def main():
     args = parse_args()
+    required_tools = [
+        'awk',
+        'bash',
+        'bwa',
+        'filter_bam',
+        'haphic',
+        'hifiasm',
+        'pigz',
+        'samblaster',
+        'samtools',
+        'seqkit',
+    ]
+    if args.ont_length != 1 or args.ont_quality != 0:
+        required_tools.append('chopper')
+    try:
+        require_input_files([
+            args.bam_hifi,
+            args.bam_hic,
+            args.bam_ont,
+            args.contig_type,
+            args.group,
+            args.hifi,
+            args.ont,
+            args.hic1,
+            args.hic2,
+        ])
+        require_tools(required_tools)
+    except PreflightError as error:
+        raise SystemExit(f"phap phase_reads: error: {error}") from error
+
     contig_type_file = 'contig_type.pickle'
     group_file = 'group_contig_type.pickle'
     contig_hifi_pickle = 'contig_hifi.pickle'
@@ -271,24 +278,28 @@ def main():
     if args.ont_length != 1 or args.ont_quality != 0:
         ont_reads_filter = ont_reads_bn + '.filter.ont.fq'
         ont_reads_filter_gzip = ont_reads_bn + '.filter.ont.fq.gz'
-        cmd = f'~/tools/Anaconda3/envs/chopper/bin/chopper -l {ont_length} -q {ont_quality} -t {args.threads} -i <(zcat {ont_reads}) > {ont_reads_filter}; pigp -p 10 {ont_reads_filter}'
-        subprocess.run(cmd, shell=True, executable='/bin/bash', close_fds=True)
+        cmd = (
+            f"chopper -l {ont_length} -q {ont_quality} -t {args.threads} "
+            f"-i {shlex.quote(ont_reads)} > {shlex.quote(ont_reads_filter)} && "
+            f"pigz -p {args.threads} {shlex.quote(ont_reads_filter)}"
+        )
+        run_shell_command(cmd)
 
     commands = []
-    process_seqkit = args.process * args.threads // 1
+    process_seqkit = args.process
     for group, reads in dic_group_hifi.items():
         with open(f'{group}.HiFi.txt', 'w') as f:
             f.write('\n'.join(reads) + '\n')
-        cmd = f'seqkit grep -j {args.threads} -f {group}.HiFi.txt {args.hifi} > {group}.HiFi.fq; pigz -p {args.threads} {group}.HiFi.fq'
+        cmd = f'seqkit grep -j {args.threads} -f {group}.HiFi.txt {args.hifi} > {group}.HiFi.fq && pigz -p {args.threads} {group}.HiFi.fq'
         commands.append(cmd)
         logging.info(f'Executing command: {cmd}')
     for group, reads in dic_group_ont.items():
         with open(f'{group}.ONT.txt', 'w') as f:
             f.write('\n'.join(reads) + '\n')
         if args.ont_length != 1 or args.ont_quality != 0:
-            cmd = f'seqkit grep -j {args.threads} -f {group}.ONT.txt {ont_reads_filter_gzip} > {group}.ONT.fq; pigz -p {args.threads} {group}.ONT.fq'
+            cmd = f'seqkit grep -j {args.threads} -f {group}.ONT.txt {ont_reads_filter_gzip} > {group}.ONT.fq && pigz -p {args.threads} {group}.ONT.fq'
         else:
-            cmd = f'seqkit grep -j {args.threads} -f {group}.ONT.txt {args.ont} > {group}.ONT.fq; pigz -p {args.threads} {group}.ONT.fq'
+            cmd = f'seqkit grep -j {args.threads} -f {group}.ONT.txt {args.ont} > {group}.ONT.fq && pigz -p {args.threads} {group}.ONT.fq'
         commands.append(cmd)
         logging.info(f'Executing command: {cmd}')
     for group, reads in dic_group_hic.items():
@@ -298,8 +309,8 @@ def main():
         with open(f'{group}.Hi-C.2.txt', 'w') as f2:
             f2.write('/2\n'.join(reads) + '/2' + '\n')
             # f2.write('\n'.join(reads) + '\n')  # for c88
-        cmd1 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.1.txt {args.hic1} > {group}.Hi-C.1.fq; pigz -p 5 {group}.Hi-C.1.fq'
-        cmd2 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.2.txt {args.hic2} > {group}.Hi-C.2.fq; pigz -p 5 {group}.Hi-C.2.fq'
+        cmd1 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.1.txt {args.hic1} > {group}.Hi-C.1.fq && pigz -p 5 {group}.Hi-C.1.fq'
+        cmd2 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.2.txt {args.hic2} > {group}.Hi-C.2.fq && pigz -p 5 {group}.Hi-C.2.fq'
         commands.append(cmd1)
         commands.append(cmd2)
         logging.info(f'Executing command: {cmd1}')
@@ -310,7 +321,7 @@ def main():
     commands = []
     for group in dic_group_hifi.keys():
         os.makedirs(f'{group}.asm', exist_ok=True)
-        cmd_hifiasm = f'nohup time -v hifiasm -t {args.threads} -o {group}.asm/{group}.asm --ul {group}.ONT.fq.gz {group}.HiFi.fq.gz > {group}.asm/log_hifiasm_out 2> {group}.asm/log_hifiasm_err'
+        cmd_hifiasm = f'hifiasm -t {args.threads} -o {group}.asm/{group}.asm --ul {group}.ONT.fq.gz {group}.HiFi.fq.gz > {group}.asm/log_hifiasm_out 2> {group}.asm/log_hifiasm_err'
         commands.append(cmd_hifiasm)
         logging.info(f'Executing command: {cmd_hifiasm}')
     run_in_parallel(commands, args.process)
@@ -325,22 +336,17 @@ def main():
         cmd_scaffolding = [
             f'awk \'{{if($0~/^S/) print ">"$2"\\n"$3}}\' {group}.asm/{group}.asm.bp.p_ctg.gfa > {group}.asm/scaffolding/01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa',
             f'bwa index {group}.asm/scaffolding/01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa',
-            f'bwa mem -5SP -t {args.threads} {group}.asm/scaffolding/01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa {group}.Hi-C.1.fq.gz {group}.Hi-C.2.fq.gz | /home/pxxiao/tools/Anaconda3/envs/haphic/bin/samblaster | samtools view - -@ {args.threads} -S -h -b -F 3340 -o {group}.asm/scaffolding/01_hic_mapping/HiC.bam',
-            f'/home/pxxiao/tools/Assembly-tools/73_HapHiC/HapHiC/utils/filter_bam {group}.asm/scaffolding/01_hic_mapping/HiC.bam 1 --nm 3 --threads {args.threads} | samtools view - -b -@ {args.threads} -o {group}.asm/scaffolding/01_hic_mapping/HiC.filtered.bam',
+            f'bwa mem -5SP -t {args.threads} {group}.asm/scaffolding/01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa {group}.Hi-C.1.fq.gz {group}.Hi-C.2.fq.gz | samblaster | samtools view - -@ {args.threads} -S -h -b -F 3340 -o {group}.asm/scaffolding/01_hic_mapping/HiC.bam',
+            f'filter_bam {group}.asm/scaffolding/01_hic_mapping/HiC.bam 1 --nm 3 --threads {args.threads} | samtools view - -b -@ {args.threads} -o {group}.asm/scaffolding/01_hic_mapping/HiC.filtered.bam',
             f'cd {group}.asm/scaffolding/02_haphic',
-            f'nohup time -v /home/pxxiao/tools/Assembly-tools/73_HapHiC/1.0.5/HapHiC/haphic pipeline ../01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa ../01_hic_mapping/HiC.filtered.bam 1 --threads {args.threads} --processes {args.process} --Nx 100 > log_haphic_out 2> log_haphic_err',
+            f'haphic pipeline ../01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa ../01_hic_mapping/HiC.filtered.bam 1 --threads {args.threads} --processes {args.process} --Nx 100 > log_haphic_out 2> log_haphic_err',
             f'cd 04.build',
-            f'nohup time -v bash juicebox.sh > log_juicebox_out 2> log_juicebox_err'
+            f'bash juicebox.sh > log_juicebox_out 2> log_juicebox_err'
         ]
         # 将命令加入到 commands 列表中
         commands.append(" && ".join(cmd_scaffolding))
         logging.info(f'Executing command sequence for {cmd_scaffolding}')
-    # 构建包含 haphic 环境的环境变量字典
-    env_vars = os.environ.copy()
-    env_vars['PATH'] = '/home/pxxiao/tools/Anaconda3/envs/haphic/bin:' + env_vars['PATH']
-    env_vars['CONDA_DEFAULT_ENV'] = 'haphic'
-    # 执行命令序列
-    run_in_parallel(commands, args.process, env_vars)
+    run_in_parallel(commands, args.process)
 
 
 if __name__ == '__main__':

@@ -1,0 +1,2 @@
+chr01_group1	ctgA
+chr01_group2	ctgB

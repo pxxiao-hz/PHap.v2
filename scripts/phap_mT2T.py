@@ -27,7 +27,17 @@ description:
 
 
 import argparse
-from util import *
+import os
+
+from phap_core.runner import PreflightError, require_input_files, require_tools
+
+from .util import (
+    cal_distance,
+    contig_pair_aln,
+    fasta_read_filter,
+    remove_redundancy_v2,
+    split_fa,
+)
 
 
 def parse_args():
@@ -66,6 +76,12 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    try:
+        require_input_files([args.p_ctg])
+        require_tools(["mash", "minimap2"])
+    except PreflightError as error:
+        raise SystemExit(f"phap mt2t: error: {error}") from error
 
     cwd = os.getcwd()
 

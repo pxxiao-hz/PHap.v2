@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 # Usage message
 usage() {
     echo "Usage: $0 <genome> <hic1> <hic2> [--threads <num_threads>]"
@@ -9,7 +11,6 @@ usage() {
     echo "  <hic2>: Path to the second Hi-C read file"
     echo "Options:"
     echo "  --threads <num_threads>: Number of threads for parallel processing (default: 32)"
-    exit 1
 }
 
 # Default value for threads
@@ -19,34 +20,46 @@ num_threads=32
 if [ "$#" -lt 3 ]; then
     echo "Error: Incorrect number of arguments!"
     usage
+    exit 1
 fi
 
-# Parse command line options
+# Assign positional arguments first.
+genome="$1"
+hic1="$2"
+hic2="$3"
+shift 3
+
+# Parse options.
 while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
         --threads)
+            if [ "$#" -lt 2 ]; then
+                echo "Error: --threads requires a value." >&2
+                exit 1
+            fi
             num_threads="$2"
-            shift
-            shift
+            shift 2
             ;;
         *)
-            break
+            echo "Error: Unknown option: $1" >&2
+            usage
+            exit 1
             ;;
     esac
 done
 
-# Assign non-option arguments to variables
-genome="$1"
-hic1="$2"
-hic2="$3"
-
-# haphic env
-source /home/pxxiao/tools/Anaconda3/bin/activate haphic
+filter_bam_command="${HAPHIC_FILTER_BAM:-filter_bam}"
+for command in bwa samblaster samtools "$filter_bam_command"; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "Error: required executable not found on PATH: $command" >&2
+        exit 127
+    fi
+done
 
 # Index the reference genome
 bwa index "$genome"
 
 # Perform read alignment and processing
 bwa mem -5SP -t "$num_threads" "$genome" "$hic1" "$hic2" | samblaster | samtools view - -@ "$num_threads" -S -h -b -F 3340 -o HiC.bam
-~/tools/Assembly-tools/73_HapHiC/HapHiC/utils/filter_bam HiC.bam 1 --nm 3 --threads "$num_threads" | samtools view - -b -@ "$num_threads" -o HiC.filtered.bam
+"$filter_bam_command" HiC.bam 1 --nm 3 --threads "$num_threads" | samtools view - -b -@ "$num_threads" -o HiC.filtered.bam

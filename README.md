@@ -24,51 +24,48 @@ A haplotype-resolved and telomere-to-telomere genome assembly pipeline (PHap) ta
 	* [TGS-GapCloser](https://github.com/BGI-Qingdao/TGS-GapCloser)
 	* [Winnowmap2](https://github.com/marbl/Winnowmap)
 	* [T2T-polish](https://github.com/arangrhie/T2T-Polish "")
-	* [Python 3.9.7](https://www.python.org/downloads/)
+	* [Python 3.9+](https://www.python.org/downloads/)
+
+External executables must be available on `PATH`. PHap checks required tools
+before starting each expensive workflow stage. HapHiC's `haphic` and
+`filter_bam` commands must also be exposed on `PATH`.
 
 ## Installation
-* Download PHap
+
 ```shell
-$ git clone git@github.com:JiaoLab2021/PHap.git
-$ cd /path/to/PHap/
-$ chmod +x PHap.py
+git clone https://github.com/pxxiao-hz/PHap.v2.git
+cd PHap.v2
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install .
+phap --help
 ```
+
+For development, install `python -m pip install -e ".[dev]"`.
 
 ## Usage
-* View the help document of PHap
+
 ```shell
-$ /path/to/PHap/PHap.py -h
-
-  Usage: phap [command] <parameters>
-
-  Command       Description
-  --------      ------------------------------------------------------------------------
-  mt2t          Generate a mosaic telomere-to-telomere genome using the p_ctg genome as
-                the reference. This is used for creating an allelic contig table to solve
-                the allelic conflict problem.
-
-  cluster       Cluster contigs. First, extract contigs corresponding to each chromosome
-                based on mT2T alignment. Then, cluster the contigs for each haplotype of
-                each chromosome using Hi-C signals. Third, cluster the contigs not on mT2T
-                chromosomes to clustered group.
-
-  phase_reads   Based on the clustering results, the corresponding reads of each haplotype
-                are extracted, then assembled and anchored separately.
-
-  Use phap [command] --help/-h to see detailed help for each individual command.
+phap --help
+phap --version
 ```
-* View the help document of subcommands of PHap
+
+View subcommand-specific options:
+
 ```
-$ /path/to/PHap/PHap.py mt2t -h 
+phap mt2t --help
 usage: Get mosaic T2T (mT2T) reference from primary contig assembly (p_ctg).
 
-$ /path/to/PHap/PHap.py cluster -h
+phap cluster --help
 usage: Haplotype clustering of autopolyploid genome.
 
-$ /path/to/PHap/PHap.py phase_reads -h
+phap phase_reads --help
 usage: Haplotype assembly and scaffolding of autopolyploid genome.
 ```
-* For convenience, users can add `/path/to/PHap/PHap.py` to environment variables, such as: `ln -s /path/to/PHap/PHap.py ~/.local/bin/phap`, and then the `phap`command can be executed directly from any location in the terminal.
+
+`python PHap.py ...` remains available as a source-checkout compatibility
+entry point.
 
 ## The pipeline for assembling a tetraploid potato genome
 Please check the [Pipeline](Pipeline.md).
