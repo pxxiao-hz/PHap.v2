@@ -23,13 +23,24 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 - 新增 `phap dosage`、window/model 审计、unitig candidate/read assignment/group
   summary 审计及相应回归测试。
 
-当前仍不能据此宣称任意倍性端到端可用：clustering/re-clustering 中仍有固定四组和
-未知 dosage 回退逻辑。新 read-assignment 会拒绝这些不守恒/无效记录，但下一批仍
-需让 clustering 将它们保留到显式 ambiguous/unassigned 输出，而不是按 haplotig
-处理。
+第三批本地 clustering correctness 修复已完成：
 
-下面的问题清单仍保留为基线审计记录。P0-1 和 P0-2 已在本地修复；其余科学
-正确性问题仍待处理。
+- clustering/re-clustering 改用显式 `--ploidy` 和动态 group，dosage `d` 必须
+  完整进入 `d` 个 group，否则不产生部分分配；
+- `low_coverage`、`ambiguous`、`high_copy` 和缺失 dosage 不再回退为 haplotig；
+- raw Hi-C count 与 group restriction-site density 同时计算和审计，
+  `--hic-score-mode` 决定实际排序；
+- 无 Hi-C 或证据并列的 unitig 不再删除或猜测；有 mT2T chromosome/bin 的记录
+  保留为 `locus_assigned_haplotype_unresolved`，并写出 ID、FASTA、reason；
+- group 文件解析显式区分带 count 和不带 count 两个阶段，输出稳定排序。
+
+当前仍不能宣称任意倍性生产数据端到端已验证：尚未运行真实全流程 benchmark；
+现有 PAF/LIS 生成 locus evidence 的实现仍需改为共享 tag-aware parser 和
+interval-union coverage，之后才能启用 identity/coverage/next-best margin 驱动的
+严格 mT2T rescue。
+
+下面的问题清单仍保留为基线审计记录。P0-1、P0-2 和 P0-4 的活动路径已在本地
+修复；其余科学正确性问题仍待处理。
 
 ## 1. 当前基线
 
@@ -80,12 +91,16 @@ group size 归一化，并明确使用 raw 还是 normalized score。
 
 ### P0-4 无 Hi-C 信号的 unitig 被当作错误分型并删除
 
+**状态：活动 clustering/re-clustering 路径已在第三批本地修复。**
+
 `scripts/phap_cluster.py:645-653,681-685` 从四个 group 中直接过滤不在
 `dic_contig_hic` 的 unitig。缺少 Hi-C links 不等于序列错误，会降低完整性并导致
 无审计的数据丢失。
 
-修复方向：保留为 `unassigned/low_support`，在最终审计表中记录原因；只有明确的
-生物学或比对证据才能删除序列。
+当前实现不再调用删除无 Hi-C unitig 的旧过滤路径。无信号、弱信号和分数边界并列
+分别进入结构化 decision audit；有 mT2T locus 的序列保留为
+`locus_assigned_haplotype_unresolved`，无 locus 的序列进入 `unassigned`，并输出
+原始 ID 的 FASTA。旧函数将在后续独立的 behavior-preserving cleanup commit 删除。
 
 ### P0-5 mT2T reverse join 坐标转换错误，单 alignment 还可能崩溃
 

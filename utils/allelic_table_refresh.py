@@ -42,6 +42,13 @@ after:
 
 import argparse
 
+from phap_core.allelic_table import (
+    AllelicTableRow,
+    filter_allelic_rows,
+    find_missing_bridge_unitigs,
+)
+from phap_core.read_assignment import parse_unitig_dosages
+
 
 ### fasta to dic
 def fasta_read(file_input):
@@ -78,18 +85,8 @@ def parse_allelic_table(file_allelic_table):
 
 ## 解析 contig type
 def parse_contig_type_based_on_dosage(file_contig_type):
-    dic_dosage_contig_type = {}
-    for lines in open(file_contig_type, 'r'):
-        if lines.startswith('contig_ID'):
-            continue
-        else:
-            line = lines.strip().split()
-            contig_type = line[2]
-            type_list = ['haplotig', 'diplotig', 'triplotig', 'tetraplotig']
-            if contig_type not in type_list:
-                contig_type = 'haplotig'
-            dic_dosage_contig_type[line[0]] = contig_type
-    return dic_dosage_contig_type
+    with open(file_contig_type) as source:
+        return parse_unitig_dosages(source)
 
 
 def get_unitig_lengths(unitig_ids, dic_fasta_len):
@@ -98,94 +95,76 @@ def get_unitig_lengths(unitig_ids, dic_fasta_len):
     return {unitig_id: dic_fasta_len.get(unitig_id, 0) for unitig_id in unitig_ids}
 
 
-def filter_allelic_table(allelic_table, unitig_types, contig_type_haplotypes, dic_fasta_len):
-    ''' 根据 contig type，对 allelic table 进行过滤 '''
-    seen_unitigs = set()        # 前面 allelic table 中出现过的 unitig
-    filtered_table = []
-    total_bins = len(allelic_table)
-    print(f'allelic table: {allelic_table}')
-
-    for idx, row in enumerate(allelic_table):
-        print(f'pxp {row}')
-        chrom, start, end, unitigs = row
-        haplotype_count = 0
-        filtered_unitigs = []
-        removed_unitig = []
-
-        # 计算每个 unitig 的长度并排序 -- 短到长，后面 pop 的时候，就是从长到短进行过滤
-        unitig_lengths = get_unitig_lengths(unitigs, dic_fasta_len)
-        sorted_unitigs = sorted(unitigs, key=lambda x: unitig_lengths[x], reverse=True)
-
-        for unitig in sorted_unitigs:
-            unitig_type = unitig_types.get(unitig, 'haplotig')
-            haplotype_count += contig_type_haplotypes[unitig_type]
-            if unitig in seen_unitigs:
-                filtered_unitigs.append(unitig)
-
-        # 检查是否所有的 unitig 都在前面出现过并且将会在后面出现
-        if haplotype_count > 4:
-            if idx > 0 and idx < total_bins - 1:
-                prev_unitigs = set(allelic_table[idx - 1][3])
-                next_unitigs = set(allelic_table[idx + 1][3])
-                new_unitigs = set(unitigs) - prev_unitigs
-
-                if all(unitig in next_unitigs for unitig in new_unitigs):
-                    filtered_table.append(None)
-                    continue
-
-        while haplotype_count > 4 and filtered_unitigs:
-            removed_unitig.append(filtered_unitigs.pop())
-            haplotype_count -= contig_type_haplotypes[unitig_types[removed_unitig[-1]]]
-        print(f'pxp {unitigs} {removed_unitig}')
-        filtered_unitigs_set = set(unitigs) - set(removed_unitig)
-        filtered_table.append((chrom, start, end, sorted(filtered_unitigs_set)))
-        seen_unitigs.update(filtered_unitigs_set)
-
-    return filtered_table
+def filter_allelic_table(allelic_table, unitig_dosages, source_states, dic_fasta_len, ploidy):
+    """Adapt the legacy tuple representation to the typed core implementation."""
+    rows = [
+        AllelicTableRow(chrom, start, end, tuple(unitigs))
+        for chrom, start, end, unitigs in allelic_table
+    ]
+    filtered, audit = filter_allelic_rows(
+        rows,
+        unitig_dosages,
+        source_states,
+        dic_fasta_len,
+        ploidy=ploidy,
+    )
+    legacy_rows = [
+        None
+        if row is None
+        else (row.chromosome, row.start, row.end, list(row.unitigs))
+        for row in filtered
+    ]
+    audit_rows = [
+        (
+            row.unitig_id,
+            row.chromosome,
+            row.start,
+            row.end,
+            row.source_state,
+            row.reason,
+        )
+        for row in audit
+    ]
+    return legacy_rows, audit_rows
 
 
-def correct_allelic_table(allelic_table, dic_fasta_len, dic_unitig_types, contig_type_haplotypes, top_n, search_range):
+def correct_allelic_table(
+    allelic_table,
+    dic_fasta_len,
+    dic_unitig_dosages,
+    source_states,
+    ploidy,
+    search_range,
+):
     ''' 修正 allelic table '''
     corrected_table = []
     total_bins = len(allelic_table)
+    typed_rows = [
+        AllelicTableRow(chromosome, start, end, tuple(unitigs))
+        for chromosome, start, end, unitigs in allelic_table
+    ]
 
     for i in range(total_bins):
         chromosome, start, end, unitigs = allelic_table[i]
         print(f"Processing bin: {chromosome}:{start}-{end}")
         original_unitigs = set(unitigs)
 
-        # 获取前 search_range 个和后 search_range 个 bin 的 unitig
-        prev_unitigs = set()
-        for j in range(max(0, i - search_range), i):
-            prev_unitigs.update(allelic_table[j][3])
-
-        next_unitigs = set()
-        for j in range(i + 1, min(total_bins, i + 1 + search_range)):
-            next_unitigs.update(allelic_table[j][3])
-
-        # # 获取前一个和后一个 bin 的 unitig
-        # prev_unitigs = set(allelic_table[i - 1][3]) if i > 0 else set()
-        # next_unitigs = set(allelic_table[i + 1][3]) if i < len(allelic_table) - 1 else set()
-
         # 找出当前 bin 中缺失的 unitig
-        missing_unitigs = (prev_unitigs & next_unitigs) - original_unitigs
+        missing_unitigs = set(
+            find_missing_bridge_unitigs(
+                typed_rows,
+                i,
+                search_range=search_range,
+            )
+        )
 
         if missing_unitigs:
             print(f"Missing unitigs in bin {chromosome}:{start}-{end}: {', '.join(missing_unitigs)}")
-
-            # 获取 unitig 的长度信息
-            unitig_lengths = get_unitig_lengths(original_unitigs | missing_unitigs, dic_fasta_len)
 
             # 将缺失的 unitig 添加进来
             new_unitigs = original_unitigs | missing_unitigs
 
             print('Debugs: new_unitigs ', new_unitigs)
-
-            # 如果新集合的大小大于 top_n，移除最短的 unitig
-            while len(new_unitigs) > top_n:
-                shortest_unitig = min(new_unitigs, key=lambda x: unitig_lengths[x])
-                print(f"Removed unitig from bin {chromosome}:{start}-{end}: {shortest_unitig}")
-                new_unitigs.remove(shortest_unitig)
 
             corrected_table.append((chromosome, start, end, sorted(new_unitigs)))
         else:
@@ -193,7 +172,13 @@ def correct_allelic_table(allelic_table, dic_fasta_len, dic_unitig_types, contig
 
     print(corrected_table)
 
-    return filter_allelic_table(corrected_table, dic_unitig_types, contig_type_haplotypes, dic_fasta_len)
+    return filter_allelic_table(
+        corrected_table,
+        dic_unitig_dosages,
+        source_states,
+        dic_fasta_len,
+        ploidy,
+    )
 
 
 def write_corrected_table1(corrected_table, output_file):
@@ -225,7 +210,14 @@ def parse_arguments():
     parser.add_argument('--fasta', type=str, help='Fasta file', required=True)
     parser.add_argument('--contig_type', type=str, help='Contig type file', required=True)
     parser.add_argument('--wd', type=str, help='working directory', required=True)
-    parser.add_argument('--top_n', type=int, help='The number of haplotypes', required=False, default=4)
+    parser.add_argument(
+        '--ploidy',
+        '--top_n',
+        dest='ploidy',
+        type=int,
+        help='Genome ploidy; --top_n is a deprecated alias',
+        required=True,
+    )
     parser.add_argument('--search_range', type=int, help='Search range', required=False, default=5)
     args = parser.parse_args()
     return args
@@ -236,23 +228,27 @@ def main():
     wd = args.wd
     dic_fasta = fasta_read(args.fasta)
     dic_fasta_len = {unitig_id: len(seq) for unitig_id, seq in dic_fasta.items()}
-    dic_unitig_types = parse_contig_type_based_on_dosage(args.contig_type)
-
-    # top_n = 4           # 设定的 haplotype 值
-    # search_range = 5    # 设置搜索范围
-
-    contig_type_haplotypes = {
-        "diplotig": 2,
-        "triplotig": 3,
-        "tetraplotig": 4,
-        "haplotig": 1
-    }
+    dic_unitig_dosages, source_states = parse_contig_type_based_on_dosage(
+        args.contig_type
+    )
 
     output_file = f'{wd}/corrected_allelic_table.txt'  # 输出文件路径
 
     allelic_table = parse_allelic_table(args.allelic_table)
-    corrected_table = correct_allelic_table(allelic_table, dic_fasta_len, dic_unitig_types, contig_type_haplotypes, args.top_n, args.search_range)
+    corrected_table, audit_rows = correct_allelic_table(
+        allelic_table,
+        dic_fasta_len,
+        dic_unitig_dosages,
+        source_states,
+        args.ploidy,
+        args.search_range,
+    )
     write_corrected_table(corrected_table, output_file)
+    audit_file = f'{wd}/allelic_table_exclusions.tsv'
+    with open(audit_file, 'w') as output:
+        output.write('unitig_ID\tchromosome\tstart\tend\tsource_state\treason\n')
+        for row in sorted(audit_rows):
+            output.write('\t'.join(map(str, row)) + '\n')
 
 
 if __name__ == '__main__':

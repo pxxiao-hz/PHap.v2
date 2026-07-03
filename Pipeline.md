@@ -80,11 +80,19 @@ phap cluster \
         --threads $threads \
         --mT2T $mt2t \
         --contig_type $contig_type \
-        --top_n 4 \
+        --ploidy 4 \
         --chr_num 12 \
         --full_links $full_links \
+        --hic-score-mode re_density \
+        --min-hic-score 0 \
+        --min-hic-margin 0 \
         --clm $clm > log_cluster_out 2> log_cluster_err &
 ```
+
+`--hic-score-mode raw` retains unnormalized Hi-C counts. `re_density` divides
+the same raw count by the total restriction sites in each candidate group.
+Both values and rankings are written to the cluster/recluster score audit
+tables regardless of which mode drives assignment.
 
 ## 6. Phase reads, de novo assembly and scaffolding
 * Based on the haplotype clustering results, raw sequencing reads, including HiFi, ONT ultra-long, and Hi-C reads, are phased into haplotype-specific read sets.

@@ -62,6 +62,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from phap_core.clustering import AllelicBin, cluster_allelic_bins
+from phap_core.read_assignment import parse_unitig_dosages
 from phap_core.runner import (
     PreflightError,
     require_input_files,
@@ -78,7 +80,7 @@ def parse_fasta(fasta, flank, RE='GATC'):
     ## 对序列计算 RE 个数
     def count_RE_sites(sequence, RE):
         ''' Count the number of restriction enzyme (RE) sites in a sequence. '''
-        return sequence.count(RE)
+        return sequence.upper().count(RE.upper())
 
     fa_dict = {}
     with open(fasta) as f:
@@ -101,7 +103,7 @@ def parse_fasta(fasta, flank, RE='GATC'):
             seq_segment = seq
 
         # Count RE sites in the determined sequence segment
-        RE_sites = count_RE_sites(seq_segment, RE) + 1  # Add pseudo-count of 1 to prevent division by zero
+        RE_sites = count_RE_sites(seq_segment, RE)
         fa_dict[ctg] = [seq, len(seq), RE_sites]
 
         # Add pseudo-count of 1 to prevent division by zero (as what ALLHiC does)
@@ -660,65 +662,159 @@ def false_genotype_unitig(g_list, dic_fasta, dic_contig_hic):
     return corrected_list
 
 
-def cluster(fasta, full_links, flank, contig_type, allelic_table_file, wd):
+def _parse_allelic_bins(file_path):
+    rows = []
+    with open(file_path) as source:
+        for line_number, line in enumerate(source, start=1):
+            fields = line.rstrip('\n').split('\t')
+            if len(fields) < 4:
+                raise ValueError(
+                    f'{file_path}:{line_number}: expected chromosome, start, end, unitigs'
+                )
+            rows.append(
+                AllelicBin(
+                    chromosome=fields[0],
+                    start=int(fields[1]),
+                    end=int(fields[2]),
+                    unitigs=tuple(fields[3:]),
+                )
+            )
+    return rows
+
+
+def _atomic_write_lines(path, lines):
+    target = Path(path)
+    temporary = target.with_name(f'.{target.name}.tmp')
+    with temporary.open('w', encoding='utf-8', newline='\n') as output:
+        for line in lines:
+            output.write(line)
+            output.write('\n')
+    os.replace(temporary, target)
+
+
+def _write_cluster_result(result, fasta_sequences, wd):
+    output_dir = Path(wd)
+    groups = dict(result.group_unitigs)
+    cluster_lines = []
+    for group_id in sorted(groups):
+        unitigs = groups[group_id]
+        cluster_lines.append(
+            '\t'.join((group_id, str(len(unitigs)), *unitigs))
+        )
+        _atomic_write_lines(
+            output_dir / f'{group_id}.txt',
+            unitigs,
+        )
+        fasta_lines = []
+        for unitig_id in unitigs:
+            if unitig_id not in fasta_sequences:
+                raise ValueError(f'unitig {unitig_id!r} is missing from chromosome FASTA')
+            fasta_lines.extend((f'>{unitig_id}', fasta_sequences[unitig_id]))
+        _atomic_write_lines(output_dir / f'{group_id}.fa', fasta_lines)
+    _atomic_write_lines(output_dir / 'group.cluster.txt', cluster_lines)
+
+    decision_lines = [
+        'unitig_ID\tchromosome\tstart\tend\tsource_state\tdosage\tstatus\t'
+        'selected_groups\treason\tscore_mode'
+    ]
+    score_lines = [
+        'unitig_ID\tgroup\traw_score\tre_sites\tre_density\tre_status\t'
+        'raw_rank\tre_density_rank'
+    ]
+    for decision in result.decisions:
+        dosage = '.' if decision.dosage is None else str(decision.dosage)
+        decision_lines.append(
+            '\t'.join(
+                (
+                    decision.unitig_id,
+                    decision.chromosome,
+                    str(decision.start),
+                    str(decision.end),
+                    decision.source_state,
+                    dosage,
+                    decision.status,
+                    ','.join(decision.selected_groups),
+                    decision.reason,
+                    decision.score_mode,
+                )
+            )
+        )
+        for score in decision.scores:
+            score_lines.append(
+                '\t'.join(
+                    (
+                        decision.unitig_id,
+                        score.group_id,
+                        f'{score.raw_score:.6f}',
+                        '.' if score.re_sites is None else str(score.re_sites),
+                        '.' if score.re_density is None else f'{score.re_density:.12g}',
+                        score.re_status,
+                        str(score.raw_rank),
+                        (
+                            '.'
+                            if score.re_density_rank is None
+                            else str(score.re_density_rank)
+                        ),
+                    )
+                )
+            )
+    _atomic_write_lines(output_dir / 'cluster_decisions.tsv', decision_lines)
+    _atomic_write_lines(output_dir / 'cluster_scores.tsv', score_lines)
+    unresolved_fasta = []
+    for decision in result.decisions:
+        if decision.status == 'assigned':
+            continue
+        if decision.unitig_id not in fasta_sequences:
+            raise ValueError(
+                f'unresolved unitig {decision.unitig_id!r} is missing from FASTA'
+            )
+        unresolved_fasta.extend(
+            (f'>{decision.unitig_id}', fasta_sequences[decision.unitig_id])
+        )
+    _atomic_write_lines(
+        output_dir / 'unassigned_unitigs.fa',
+        unresolved_fasta,
+    )
+
+
+def cluster(
+    fasta,
+    full_links,
+    flank,
+    contig_type,
+    allelic_table_file,
+    wd,
+    *,
+    ploidy,
+    score_mode,
+    min_score,
+    min_margin,
+    RE,
+):
     dic_fasta = fasta_read(fasta)
-    fa_dict = parse_fasta(fasta, flank)
-    dic_contig_type = parse_contig_type(contig_type)
-    full_link_dict, sorted_ctg_list, RE_site_dict = parse_pickle(fa_dict, full_links, dic_contig_type)
+    fa_dict = parse_fasta(fasta, flank, RE)
+    with open(contig_type) as dosage_source:
+        dosage_by_unitig, source_states = parse_unitig_dosages(dosage_source)
+    full_link_dict = load_pickle_file(full_links)
+    RE_site_dict = {ctg: ctg_info[2] for ctg, ctg_info in fa_dict.items()}
     out = open(os.path.join(wd, 'full.links.txt'), 'w')
-    for key, value in full_link_dict.items():
+    for key, value in sorted(full_link_dict.items()):
         out.write(str(key) + '\t' + str(value) + '\n')
     out.close()
 
-    ### step1: 解析获得 unitig flank Hi-C links
-    dic_pair_hic = load_pickle_file(full_links)
-    out = open(os.path.join(wd, 'flank.links.txt'), 'w')
-    for key, value in dic_pair_hic.items():
-        out.write(str(key) + '\t' + str(value) + '\n')
-        # print(key, value)
-    out.close()
-
-    dic_contig_hic = get_link_list(dic_pair_hic)
-    dic_overlap_ratios = unitig_overlap_ratio(allelic_table_file)
-    g1, g2, g3, g4 = genotype_allelic_table(allelic_table_file,
-                                            dic_contig_type,
-                                            dic_contig_hic,
-                                            dic_overlap_ratios,
-                                            RE_site_dict)
-    ### 错误分型的 unitig
-    g1 = false_genotype_unitig(g1, dic_fasta, dic_contig_hic)
-    g2 = false_genotype_unitig(g2, dic_fasta, dic_contig_hic)
-    g3 = false_genotype_unitig(g3, dic_fasta, dic_contig_hic)
-    g4 = false_genotype_unitig(g4, dic_fasta, dic_contig_hic)
-    print(f'Debugs: g1 {g1}')
-    print(f'Debugs: g2 {g2}')
-    print(f'Debugs: g3 {g3}')
-    print(f'Debugs: g4 {g4}')
-    list_to_file(g1, f'{wd}/g1.txt')
-    list_to_file(g2, f'{wd}/g2.txt')
-    list_to_file(g3, f'{wd}/g3.txt')
-    list_to_file(g4, f'{wd}/g4.txt')
-    group_cluster_file = os.path.join(wd, 'group.cluster.txt')
-    if os.path.exists(group_cluster_file):
-        os.remove(group_cluster_file)
-    list_to_cluster_file(g1, 'group1', group_cluster_file)
-    list_to_cluster_file(g2, 'group2', group_cluster_file)
-    list_to_cluster_file(g3, 'group3', group_cluster_file)
-    list_to_cluster_file(g4, 'group4', group_cluster_file)
-    output_fa_from_list(g1, dic_fasta, f'{wd}/g1.fa')
-    output_fa_from_list(g2, dic_fasta, f'{wd}/g2.fa')
-    output_fa_from_list(g3, dic_fasta, f'{wd}/g3.fa')
-    output_fa_from_list(g4, dic_fasta, f'{wd}/g4.fa')
-    # note: 这里的g1, g2, g3, g4已经更改了，末尾添加了' '
-    write_combined_genotypes_to_file(g1, g2, g3, g4, f'{wd}/g1g2g3g4.txt')
-    ## merge g1+g2+g3+g4
-    merged_fasta = os.path.join(wd, 'g1g2g3g4.fa')
-    if os.path.exists(merged_fasta):
-        os.remove(merged_fasta)
-    rename_id(f'{wd}/g1.fa', merged_fasta)
-    rename_id(f'{wd}/g2.fa', merged_fasta)
-    rename_id(f'{wd}/g3.fa', merged_fasta)
-    rename_id(f'{wd}/g4.fa', merged_fasta)
+    rows = _parse_allelic_bins(allelic_table_file)
+    result = cluster_allelic_bins(
+        rows,
+        dosage_by_unitig,
+        source_states,
+        full_link_dict,
+        RE_site_dict,
+        ploidy=ploidy,
+        score_mode=score_mode,
+        min_score=min_score,
+        min_margin=min_margin,
+    )
+    _write_cluster_result(result, dic_fasta, wd)
 
 
 def parse_arguments():
@@ -741,13 +837,52 @@ def parse_arguments():
 
     allelic_table = parser.add_argument_group('>>> Allelic table generated')
     allelic_table.add_argument("--bin_size", type=int, default=100000, help="Bin size [100000]")
-    allelic_table.add_argument('--chr_num', type=int, default=12, help='The number of chromosomes [12]')
-    allelic_table.add_argument('--top_n', type=int, default=4, help='The number of haplotypes, for example, tetraploid is 4 [4]')
+    allelic_table.add_argument(
+        '--chr_num',
+        type=int,
+        required=True,
+        help='The number of chromosomes',
+    )
+    allelic_table.add_argument(
+        '--ploidy',
+        '--top_n',
+        dest='ploidy',
+        type=int,
+        required=True,
+        help='Genome ploidy; --top_n is a deprecated alias',
+    )
     allelic_table.add_argument('--search_range', type=int, default=20, help='Search range [20]')
 
     cluster = parser.add_argument_group('>>> Cluster based on Hi-C links')
     cluster.add_argument('--full_links', type=str, required=True, help='Path to full links pickle')
-    cluster.add_argument('--flank', type=int, help='Flank')
+    cluster.add_argument(
+        '--RE',
+        default='GATC',
+        help='Restriction-enzyme recognition sequence [GATC]',
+    )
+    cluster.add_argument(
+        '--hic-score-mode',
+        choices=('raw', 're_density'),
+        default='re_density',
+        help='Hi-C score used for assignment [re_density]',
+    )
+    cluster.add_argument(
+        '--min-hic-score',
+        type=float,
+        default=0.0,
+        help='Minimum selected raw count or RE density [0]',
+    )
+    cluster.add_argument(
+        '--min-hic-margin',
+        type=float,
+        default=0.0,
+        help='Minimum score gap at the dosage selection boundary [0]',
+    )
+    cluster.add_argument(
+        '--flank',
+        type=int,
+        help='Deprecated; flank RE normalization is incompatible with full_links',
+    )
 
     recluster = parser.add_argument_group('>>> Recluster based on Hi-C links')
     recluster.add_argument('--clm', type=str, required=True, help='Path to clm, from parsed hi-c links bam')
@@ -758,6 +893,19 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    if args.ploidy < 1:
+        raise SystemExit('phap cluster: error: --ploidy must be at least 1')
+    if args.chr_num < 1:
+        raise SystemExit('phap cluster: error: --chr_num must be at least 1')
+    if args.min_hic_score < 0 or args.min_hic_margin < 0:
+        raise SystemExit('phap cluster: error: Hi-C thresholds must be non-negative')
+    if not args.RE:
+        raise SystemExit('phap cluster: error: --RE must not be empty')
+    if args.flank is not None:
+        raise SystemExit(
+            'phap cluster: error: --flank cannot normalize full-contig links; '
+            'omit it to use full-length RE counts'
+        )
 
     try:
         require_input_files(
@@ -823,7 +971,7 @@ def main():
             sys.executable, '-m', 'utils.allelic_table_generate',
             '--paf_file', best_paf_file,
             '--bin_size', str(args.bin_size),
-            '--top_n', str(args.top_n),
+            '--top_n', str(args.ploidy),
             '--chr_num', str(args.chr_num),
             '--contig_type', args.contig_type,
             '--out_top_contigs_per_bin', top_contigs_file,
@@ -844,7 +992,7 @@ def main():
             '--allelic_table', allelic_table_sorted,
             '--fasta', args.p_utg,
             '--contig_type', args.contig_type,
-            '--top_n', str(args.top_n),
+            '--top_n', str(args.ploidy),
             '--search_range', str(args.search_range)
         ])
 
@@ -890,7 +1038,19 @@ def main():
                 for line in source:
                     if line.split('\t', 1)[0] == chr:
                         output.write(line)
-        cluster(file, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
+        cluster(
+            file,
+            args.full_links,
+            args.flank,
+            args.contig_type,
+            allelic_table_chr,
+            cluster_chr_dir,
+            ploidy=args.ploidy,
+            score_mode=args.hic_score_mode,
+            min_score=args.min_hic_score,
+            min_margin=args.min_hic_margin,
+            RE=args.RE,
+        )
 
     ### step4: Re-cluster unclustered unitig
     commands = []
@@ -908,6 +1068,11 @@ def main():
             '--full_links', args.full_links,
             '--clusters_file', os.path.join(step3_dir, chr, 'group.cluster.txt'),
             '--clm_file', args.clm,
+            '--ploidy', str(args.ploidy),
+            '--hic_score_mode', args.hic_score_mode,
+            '--min_hic_score', str(args.min_hic_score),
+            '--min_hic_margin', str(args.min_hic_margin),
+            '--RE', args.RE,
         ]
         cmd = (
             f"cd {shlex.quote(recluster_chr_dir)} && {shlex.join(command)} "
@@ -921,7 +1086,7 @@ def main():
     os.makedirs(step5_dir, exist_ok=True)
     # 生成总的 merge.group.reassignment.cluster.txt
     recluster_cluster_file_list = sorted(
-        glob.glob(os.path.join(step4_dir, 'chr*', 'group.reassignment.cluster.txt'))
+        glob.glob(os.path.join(step4_dir, '*', 'group.reassignment.cluster.txt'))
     )
     merged_cluster_file = os.path.join(step5_dir, 'merge.group.reassignment.cluster.txt')
     with open(merged_cluster_file, 'w') as output:
@@ -939,6 +1104,11 @@ def main():
         '--full_links', args.full_links,
         '--clusters_file', merged_cluster_file,
         '--clm_file', args.clm,
+        '--ploidy', str(args.ploidy),
+        '--hic_score_mode', args.hic_score_mode,
+        '--min_hic_score', str(args.min_hic_score),
+        '--min_hic_margin', str(args.min_hic_margin),
+        '--RE', args.RE,
     ]
     with open(os.path.join(step5_dir, 'log_rescue_out'), 'w') as stdout, open(
         os.path.join(step5_dir, 'log_rescue_err'), 'w'

@@ -14,9 +14,17 @@ To do list:
 import argparse
 import os
 import pickle
-import pandas as pd
 # from util import *
 from collections import defaultdict
+
+from phap_core.read_assignment import parse_unitig_dosages
+from phap_core.reclustering import reassign_unitigs
+from utils.recluster_common import (
+    load_pair_links,
+    parse_group_file,
+    read_fasta_with_re_sites,
+    write_recluster_outputs,
+)
 
 
 def load_pickle_file(file_path):
@@ -26,6 +34,8 @@ def load_pickle_file(file_path):
 
 
 def parse_contig_type(file_contig_type):
+    import pandas as pd
+
     df = pd.read_csv(file_contig_type, delim_whitespace=True)
     dic_contig_type = dict(zip(df['contig_ID'], df['contig_type']))
     return dic_contig_type
@@ -462,49 +472,72 @@ def parse_arguments():
     parser.add_argument('--clm_file', type=str, required=True, help='clm file')
     parser.add_argument('--normalize_by_nlinks', required=False, action='store_true',
                         help='normalize inter-contig and inter-group Hi-C links by the number of links to other contigs or groups, default: %(default)s')
+    parser.add_argument('--ploidy', type=int, required=True, help='Genome ploidy')
+    parser.add_argument(
+        '--hic_score_mode',
+        choices=('raw', 're_density'),
+        required=True,
+        help='Hi-C score used for assignment',
+    )
+    parser.add_argument('--min_hic_score', type=float, default=0.0)
+    parser.add_argument('--min_hic_margin', type=float, default=0.0)
     args = parser.parse_args()
     return args
 
 
 def main():
     args = parse_arguments()
+    if args.normalize_by_nlinks:
+        raise SystemExit(
+            'normalize_by_nlinks is replaced by --hic_score_mode raw|re_density'
+        )
+    if args.ploidy < 1:
+        raise SystemExit('--ploidy must be at least 1')
+    if args.min_hic_score < 0 or args.min_hic_margin < 0:
+        raise SystemExit('Hi-C thresholds must be non-negative')
 
-    ### step1: hi-c links density
-    ## fa dict
-    fa_dict = parse_fasta(args.fasta)
-
-    file_bn = os.path.basename(args.fasta)
-    chr = file_bn.replace('.putg.fa', '')
-
-    ## contig type
-    dic_contig_type = parse_contig_type(args.contig_type)
-    print(f'Debugs: dic_contig_type {dic_contig_type}')
-
-    ## RE site
-    full_link_dict, sorted_ctg_list, RE_site_dict = parse_pickle(fa_dict, args.full_links)
-    print(f'Debugs: full_link_dict {full_link_dict}')
-    print(f'Debugs: sorted_ctg_list {len(sorted_ctg_list)} {sorted_ctg_list}')
-    print(f'Debugs: RE_site_dict {RE_site_dict}')
-    out = open('full.links.txt', 'w')
-    for key, value in full_link_dict.items():
-        out.write(str(key) + '\t' + str(value) + '\n')
-    out.close()
-
-    ## parse_clusters
-    ctg_group_dict, group_RE_dict = parse_clusters(args.clusters_file, RE_site_dict)
-    print(f'Debugs: ctg_group_dict {ctg_group_dict} ')
-    print(f'Debugs: group_RE_dict {group_RE_dict}')
-
-    ## cal link density
-    ctg_group_link_dict, linked_ctg_dict = parse_link_dict(full_link_dict, ctg_group_dict, normalize_by_nlinks=args.normalize_by_nlinks)
-    print(f'Debugs ctg_group_link_dict {ctg_group_link_dict}')
-    print(f'Debugs link_dict {linked_ctg_dict}')
-
-    ctg_group_dict_new, list_unreassigned_unitig = assign_unitigs_by_density(sorted_ctg_list, ctg_group_dict, dic_contig_type, full_link_dict, RE_site_dict, group_RE_dict)
-    write_group_ids_and_sequences(ctg_group_dict_new, list_unreassigned_unitig, fa_dict, chr)
+    sequences, lengths, restriction_sites = read_fasta_with_re_sites(
+        args.fasta,
+        args.RE,
+    )
+    chromosome = os.path.basename(args.fasta).replace('.putg.fa', '')
+    with open(args.contig_type) as source:
+        dosages, source_states = parse_unitig_dosages(source)
+    pair_links = load_pair_links(args.full_links)
+    memberships, declared_groups = parse_group_file(
+        args.clusters_file,
+        has_count_column=True,
+    )
+    unitig_ids = sorted(sequences, key=lambda unitig: (-lengths[unitig], unitig))
+    result = reassign_unitigs(
+        unitig_ids,
+        memberships,
+        dosages,
+        source_states,
+        pair_links,
+        restriction_sites,
+        ploidy=args.ploidy,
+        score_mode=args.hic_score_mode,
+        min_score=args.min_hic_score,
+        min_margin=args.min_hic_margin,
+        known_locus=chromosome,
+        declared_groups=declared_groups,
+    )
+    new_memberships = write_recluster_outputs(
+        result,
+        sequences,
+        lengths,
+        restriction_sites,
+        declared_groups,
+        output_group_id=lambda group_id: f'{chromosome}_{group_id}',
+    )
 
     ## split clm
-    split_clm_file(args.clm_file, group_RE_dict, ctg_group_dict)
+    split_clm_file(
+        args.clm_file,
+        {group_id: 0 for group_id in declared_groups},
+        new_memberships,
+    )
 
     # run_reassignment(sorted_ctg_list, ctg_group_link_dict, ctg_group_dict, full_link_dict, linked_ctg_dict, fa_dict, RE_site_dict, group_RE_dict)
 
