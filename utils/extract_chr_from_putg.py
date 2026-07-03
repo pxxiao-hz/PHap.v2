@@ -9,13 +9,14 @@ description: 找到 p_utg 与 mT2T 之间的最佳匹配
 
 
 import argparse
-import re
 from collections import defaultdict
 import os
 import subprocess
 import pandas as pd
 import pysam
 import pickle
+
+from phap_core.paf import read_paf, select_primary_records
 
 
 def fasta_read(file_input):
@@ -171,23 +172,13 @@ def calculate_contig_match_ratio(file_paf, wd, args):
     chr_num = args.chr_num
     contig_match_ratios = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))
     dic_scaffold_length = {}        # 存储 Scaffolds 长度
-    cigar_pattern = re.compile(r'(\d+)([A-Z])')
-
-    for lines in open(file_paf, 'r'):
-        line = lines.strip().split()
-
-        # 跳过次要比对
-        if line[16][-1] == 'S':
-            continue
-        # match count
-        cigar = line[-1][5:]
-        matches = cigar_pattern.findall(cigar)
-        match_count = sum(int(length) for length, op in matches if op == 'M')
-
-        putg_id = line[0]
-        putg_length = int(line[1])
-        scaffold_length = int(line[6])
-        scaffold_id = line[5]
+    records, _ = select_primary_records(read_paf(file_paf), require_tp=True)
+    for record in records:
+        match_count = record.matching_bases
+        putg_id = record.query_name
+        putg_length = record.query_length
+        scaffold_length = record.target_length
+        scaffold_id = record.target_name
         # putg_length, match count, match ratio
         contig_match_ratios[putg_id][scaffold_id][0] = putg_length
         contig_match_ratios[putg_id][scaffold_id][1] += match_count

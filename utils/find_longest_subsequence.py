@@ -39,29 +39,30 @@ import os
 from collections import defaultdict
 from intervaltree import Interval, IntervalTree
 
+from phap_core.paf import parse_paf_line as parse_paf_record
 
-def parse_paf_line(line, min_align_length, min_unitig_length):
+
+def parse_paf_line(
+    line,
+    min_align_length,
+    min_unitig_length,
+    source="<memory>",
+    line_number=1,
+):
     ''' 解析 PAF 文件的行 '''
-    parts = line.strip().split('\t')
-    query_id = parts[0]
-    query_len = int(parts[1])
-    query_start = int(parts[2])
-    query_end = int(parts[3])
-    target_id = parts[5]
-    target_len = int(parts[6])
-    target_start = int(parts[7])
-    target_end = int(parts[8])
-    match_len = int(parts[9])
-
-    align_type = parts[16][-1]
-    if align_type == 'S':
+    record = parse_paf_record(
+        line,
+        source=source,
+        line_number=line_number,
+    )
+    if not record.is_primary:
         return None
-    elif query_len < min_unitig_length:
+    elif record.query_length < min_unitig_length:
         return None
-    elif match_len <= min_align_length:
+    elif record.matching_bases <= min_align_length:
         return None
     else:
-        return parts
+        return list(record.fields)
 
 
 def filter_contained_alignments(alignments):   # 时间消耗：1m20.517s
@@ -84,8 +85,14 @@ def read_paf(file_paf, min_align_length, min_unitig_length):
     ''' 读取 PAF 文件，返回所有对齐信息 '''
     alignments = defaultdict(list)
     with open(file_paf, 'r') as f:
-        for line in f:
-            alignment = parse_paf_line(line, min_align_length, min_unitig_length)
+        for line_number, line in enumerate(f, start=1):
+            alignment = parse_paf_line(
+                line,
+                min_align_length,
+                min_unitig_length,
+                file_paf,
+                line_number,
+            )
             if alignment:
                 query_id = alignment[0]
                 alignments[query_id].append(alignment)

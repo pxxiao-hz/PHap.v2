@@ -13,6 +13,8 @@ import os
 import numpy as np
 import argparse
 
+from phap_core.paf import parse_paf_line as parse_paf_record
+
 '''
 alignment filter:
     1. Skip supplementary alignments
@@ -33,41 +35,41 @@ def parse_contig_type_based_on_dosage(file_contig_type):
     return dic_dosage_contig_type
 
 
-def parse_paf_line(line, min_align_length, min_unitig_length):
-    parts = line.strip().split('\t')
-    query_id = parts[0]
-    query_len = int(parts[1])
-    query_start = int(parts[2])
-    query_end = int(parts[3])
-    target_id = parts[5]
-    target_len = int(parts[6])
-    target_start = int(parts[7])
-    target_end = int(parts[8])
-    match_len = int(parts[9])
+def parse_paf_line(
+    line,
+    min_align_length,
+    min_unitig_length,
+    source="<memory>",
+    line_number=1,
+):
+    record = parse_paf_record(
+        line,
+        source=source,
+        line_number=line_number,
+    )
 
-    ## filter: primary alignment or supplementary alignment
-    align_type = parts[16][-1]
-    if align_type == 'S':
+    ## filter: explicit minimap2 primary alignment
+    if not record.is_primary:
         return None
 
     ## filter: min alignment length
-    if match_len < min_align_length:
+    if record.matching_bases < min_align_length:
         return None
 
     ## filter: min unitig length
-    if query_len < min_unitig_length:
+    if record.query_length < min_unitig_length:
         return None
 
     return {
-        'query_id': query_id,
-        'query_len': query_len,
-        'query_start': query_start,
-        'query_end': query_end,
-        'target_id': target_id,
-        'target_len': target_len,
-        'target_start': target_start,
-        'target_end': target_end,
-        'match_len': match_len
+        'query_id': record.query_name,
+        'query_len': record.query_length,
+        'query_start': record.query_start,
+        'query_end': record.query_end,
+        'target_id': record.target_name,
+        'target_len': record.target_length,
+        'target_start': record.target_start,
+        'target_end': record.target_end,
+        'match_len': record.matching_bases,
     }
 
 
@@ -75,8 +77,14 @@ def read_paf(file_paf, min_align_length, min_unitig_length, chr_num):
     alignments = []
     dic_scaffold_length = {}        # 存储 Scaffolds 长度
     with open(file_paf, 'r') as f:
-        for line in f:
-            alignment = parse_paf_line(line, min_align_length, min_unitig_length)
+        for line_number, line in enumerate(f, start=1):
+            alignment = parse_paf_line(
+                line,
+                min_align_length,
+                min_unitig_length,
+                file_paf,
+                line_number,
+            )
             if alignment:                       # Skip supplementary alignment
                 alignments.append(alignment)
                 dic_scaffold_length[alignment['target_id']] = alignment['target_len']
