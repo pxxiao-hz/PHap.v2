@@ -830,10 +830,57 @@ def parse_arguments():
     find_longest.add_argument('--min_align_length', type=int, default=200, help="Minimum alignment length [200]")
     find_longest.add_argument("--min_unitig_length", type=int, default=1000, help="Minimum unitig length [1000]")
     find_longest.add_argument('--min_alignment_distance', type=int, default=500000, help='The minimum distance between two alignments [500000]')
-    find_longest.add_argument('--min_match_ratio', type=float, default=0.05, help='Minimum match ratio [0.05]')
+    find_longest.add_argument(
+        '--min-locus-query-coverage',
+        '--min_match_ratio',
+        dest='min_locus_query_coverage',
+        type=float,
+        default=0.05,
+        help='Minimum interval-union query coverage for locus placement [0.05]',
+    )
     find_longest.add_argument('--min_lis_size', type=int, default=5, help='Minimum number of alignments in a LIS to be considered for mergeing [5]')
     find_longest.add_argument('--min_lis_length', type=int, default=1000000, help='Minimum length of alignments in a LIS to be considered for mergeing [1000000]')
     find_longest.add_argument('--max_lis_distance', type=int, default=3000000, help='Maximum distance between LIS to be considered for merge [3000000]')
+
+    locus = parser.add_argument_group('>>> Strict mT2T locus evidence')
+    locus.add_argument(
+        '--min-locus-identity',
+        type=float,
+        default=0.8,
+        help='Minimum chain identity fraction [0.8]',
+    )
+    locus.add_argument(
+        '--min-locus-score-margin',
+        type=float,
+        default=0.05,
+        help='Minimum best-minus-next locus score margin [0.05]',
+    )
+    locus.add_argument(
+        '--max-locus-query-gap',
+        type=int,
+        default=3000000,
+        help='Maximum query gap within a collinear chain, in bases [3000000]',
+    )
+    locus.add_argument(
+        '--max-locus-target-gap',
+        type=int,
+        default=3000000,
+        help='Maximum oriented target gap within a chain, in bases [3000000]',
+    )
+    locus.add_argument(
+        '--locus-targets',
+        help='Optional file listing allowed mT2T target IDs; otherwise use --chr_num longest targets',
+    )
+    locus.add_argument(
+        '--low-coverage-support-file',
+        help='Optional prevalidated TSV: unitig_ID, read_support',
+    )
+    locus.add_argument(
+        '--min-low-coverage-read-support',
+        type=int,
+        default=1,
+        help='Minimum independent reads for a low-coverage locus candidate [1]',
+    )
 
     allelic_table = parser.add_argument_group('>>> Allelic table generated')
     allelic_table.add_argument("--bin_size", type=int, default=100000, help="Bin size [100000]")
@@ -899,6 +946,19 @@ def main():
         raise SystemExit('phap cluster: error: --chr_num must be at least 1')
     if args.min_hic_score < 0 or args.min_hic_margin < 0:
         raise SystemExit('phap cluster: error: Hi-C thresholds must be non-negative')
+    for name, value in (
+        ('--min-locus-identity', args.min_locus_identity),
+        ('--min-locus-query-coverage', args.min_locus_query_coverage),
+        ('--min-locus-score-margin', args.min_locus_score_margin),
+    ):
+        if not 0 <= value <= 1:
+            raise SystemExit(f'phap cluster: error: {name} must be in [0, 1]')
+    if args.max_locus_query_gap < 0 or args.max_locus_target_gap < 0:
+        raise SystemExit('phap cluster: error: locus chain gaps must be non-negative')
+    if args.min_low_coverage_read_support < 0:
+        raise SystemExit(
+            'phap cluster: error: --min-low-coverage-read-support must be non-negative'
+        )
     if not args.RE:
         raise SystemExit('phap cluster: error: --RE must not be empty')
     if args.flank is not None:
@@ -908,9 +968,31 @@ def main():
         )
 
     try:
-        require_input_files(
-            [args.p_utg, args.mT2T, args.contig_type, args.full_links, args.clm]
-        )
+        input_files = [
+            args.p_utg,
+            args.mT2T,
+            args.contig_type,
+            args.full_links,
+            args.clm,
+        ]
+        if args.locus_targets:
+            input_files.append(args.locus_targets)
+        if args.low_coverage_support_file:
+            input_files.append(args.low_coverage_support_file)
+        require_input_files(input_files)
+        if args.locus_targets:
+            with open(args.locus_targets, encoding='utf-8') as target_source:
+                target_ids = [
+                    line.strip()
+                    for line in target_source
+                    if line.strip() and not line.startswith('#')
+                ]
+            if len(target_ids) != len(set(target_ids)):
+                raise PreflightError('--locus-targets contains duplicate IDs')
+            if len(target_ids) != args.chr_num:
+                raise PreflightError(
+                    '--locus-targets record count must equal --chr_num'
+                )
         require_tools(["minimap2", "sort"])
     except PreflightError as error:
         raise SystemExit(f"phap cluster: error: {error}") from error
@@ -923,6 +1005,12 @@ def main():
 
     paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.paf')
     sorted_paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.sort.paf')
+    locus_filtered_paf = os.path.join(step1_dir, 'p_utg_vs_mT2T.locus_filtered.paf')
+    paf_alignment_audit = os.path.join(step1_dir, 'paf_alignment_audit.tsv')
+    locus_candidate_audit = os.path.join(step1_dir, 'unitig_locus_candidates.tsv')
+    locus_decision_audit = os.path.join(step1_dir, 'locus_rescue_decisions.tsv')
+    locus_routing_audit = os.path.join(step1_dir, 'unitig_routing.tsv')
+    locus_manifest = os.path.join(step1_dir, 'locus_evidence_manifest.tsv')
     best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.best.paf')
     allelic_table_file = os.path.join(step1_dir, 'allelic.ctg.table')
     allelic_table_sorted = os.path.join(step1_dir, 'allelic.ctg.table.sort')
@@ -952,15 +1040,46 @@ def main():
                 stdout=output,
             )
 
+        locus_command = [
+            sys.executable, '-m', 'utils.paf_locus_evidence',
+            '--paf', sorted_paf_file,
+            '--unitig-fasta', args.p_utg,
+            '--contig-type', args.contig_type,
+            '--min-query-length', str(args.min_unitig_length),
+            '--min-alignment-block-length', str(args.min_align_length),
+            '--max-query-gap', str(args.max_locus_query_gap),
+            '--max-target-gap', str(args.max_locus_target_gap),
+            '--min-locus-identity', str(args.min_locus_identity),
+            '--min-locus-query-coverage', str(args.min_locus_query_coverage),
+            '--min-locus-score-margin', str(args.min_locus_score_margin),
+            '--min-low-coverage-read-support',
+            str(args.min_low_coverage_read_support),
+            '--filtered-paf', locus_filtered_paf,
+            '--alignment-audit', paf_alignment_audit,
+            '--candidate-audit', locus_candidate_audit,
+            '--decision-audit', locus_decision_audit,
+            '--routing-audit', locus_routing_audit,
+            '--manifest', locus_manifest,
+        ]
+        if args.locus_targets:
+            locus_command.extend(['--target-list', args.locus_targets])
+        else:
+            locus_command.extend(['--target-count', str(args.chr_num)])
+        if args.low_coverage_support_file:
+            locus_command.extend(
+                ['--read-support', args.low_coverage_support_file]
+            )
+        run_command(locus_command)
+
         # Find the longest subsequence
         run_command([
             sys.executable, '-m', 'utils.find_longest_subsequence',
-            '--paf', sorted_paf_file,
+            '--paf', locus_filtered_paf,
             '--min_alignment_distance', str(args.min_alignment_distance),
             '--min_align_length', str(args.min_align_length),
             '--min_unitig_length', str(args.min_unitig_length),
             '--best_lis_output', best_paf_file,
-            '--min_match_ratio', str(args.min_match_ratio),
+            '--min_match_ratio', str(args.min_locus_query_coverage),
             '--min_lis_size', str(args.min_lis_size),
             '--min_lis_length', str(args.min_lis_length),
             '--max_lis_distance', str(args.max_lis_distance)
@@ -1005,11 +1124,10 @@ def main():
     os.makedirs(step2_dir, exist_ok=True)
     try:
         run_command([
-            sys.executable, '-m', 'utils.extract_chr_from_putg',
-            '--p_utg', args.p_utg,
-            '--paf', best_paf_file,
-            '--wd', step2_dir,
-            '--chr_num', str(args.chr_num)
+            sys.executable, '-m', 'utils.extract_locus_sequences',
+            '--p-utg', args.p_utg,
+            '--locus-decisions', locus_decision_audit,
+            '--output-directory', step2_dir,
         ])
 
     except subprocess.CalledProcessError as e:

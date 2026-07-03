@@ -82,6 +82,9 @@ phap cluster \
         --contig_type $contig_type \
         --ploidy 4 \
         --chr_num 12 \
+        --min-locus-identity 0.8 \
+        --min-locus-query-coverage 0.05 \
+        --min-locus-score-margin 0.05 \
         --full_links $full_links \
         --hic-score-mode re_density \
         --min-hic-score 0 \
@@ -93,6 +96,22 @@ phap cluster \
 the same raw count by the total restriction sites in each candidate group.
 Both values and rankings are written to the cluster/recluster score audit
 tables regardless of which mode drives assignment.
+
+Locus placement is evaluated from the complete PAF before a best target is
+selected. Query coverage uses the union of 0-based half-open query intervals;
+chain identity, orientation, collinearity, and the best-versus-next-best score
+margin must all pass. mT2T evidence assigns only a locus, never a haplotype
+group. The stage writes `paf_alignment_audit.tsv`,
+`unitig_locus_candidates.tsv`, `locus_rescue_decisions.tsv`,
+`unitig_routing.tsv`, `locus_sequence_routing.tsv`, and a
+`locus_evidence_manifest.tsv` containing the exact thresholds and target set.
+
+Low-coverage records are not assumed to be haplotigs. An optional
+`--low-coverage-support-file` must contain prevalidated
+`unitig_ID read_support` rows; only a unique locus plus the configured
+`--min-low-coverage-read-support` marks a
+`low_coverage_haplotig_candidate`. This label does not force dosage 1 or a
+haplotype-group assignment.
 
 ## 6. Phase reads, de novo assembly and scaffolding
 * Based on the haplotype clustering results, raw sequencing reads, including HiFi, ONT ultra-long, and Hi-C reads, are phased into haplotype-specific read sets.

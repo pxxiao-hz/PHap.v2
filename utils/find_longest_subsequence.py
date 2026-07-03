@@ -37,8 +37,8 @@ description: 过滤掉 contained alignment -- filter_contained_alignments
 import argparse
 import os
 from collections import defaultdict
-from intervaltree import Interval, IntervalTree
 
+from phap_core.locus_rescue import interval_union_length
 from phap_core.paf import parse_paf_line as parse_paf_record
 
 
@@ -59,7 +59,7 @@ def parse_paf_line(
         return None
     elif record.query_length < min_unitig_length:
         return None
-    elif record.matching_bases <= min_align_length:
+    elif record.alignment_block_length <= min_align_length:
         return None
     else:
         return list(record.fields)
@@ -113,42 +113,58 @@ def find_best_reference_for_unitig(unitig_alignments, min_match_ratio, min_align
     找到 unitig 的最佳匹配参考序列，并计算匹配比率。
     优先依据总匹配长度，再次依据对齐数量，确保选择具有最好整体对齐质量的 reference。
     '''
-    reference_stats = defaultdict(lambda: [0, 0])  # 每个 reference 的 [对齐数量, 总匹配长度]
+    reference_stats = defaultdict(
+        lambda: {
+            'count': 0,
+            'matching_bases': 0,
+            'block_bases': 0,
+            'query_intervals': [],
+        }
+    )
     unitig_len = int(unitig_alignments[0][1])      # unitig 长度
 
     if unitig_len < min_unitig_length:
         return None, None
 
     for alignment in unitig_alignments:
-        match_len = int(alignment[9])
-        if match_len < min_align_length:
+        block_length = int(alignment[10])
+        if block_length < min_align_length:
             continue
         reference_id = alignment[5]
-        reference_stats[reference_id][0] += 1            # 对齐数量
-        reference_stats[reference_id][1] += match_len    # 总匹配长度
+        reference_stats[reference_id]['count'] += 1
+        reference_stats[reference_id]['matching_bases'] += int(alignment[9])
+        reference_stats[reference_id]['block_bases'] += block_length
+        reference_stats[reference_id]['query_intervals'].append(
+            (int(alignment[2]), int(alignment[3]))
+        )
 
     if not reference_stats:
         return None, None
 
-    # 找出总匹配长度最大的 reference
-    best_reference_length = max(reference_stats.keys(), key=lambda ref: reference_stats[ref][1])
+    ranked_references = []
+    for reference_id, stats in reference_stats.items():
+        union_bases = interval_union_length(
+            stats['query_intervals'],
+            sequence_length=unitig_len,
+        )
+        coverage = union_bases / unitig_len
+        identity = (
+            stats['matching_bases'] / stats['block_bases']
+            if stats['block_bases']
+            else 0.0
+        )
+        ranked_references.append(
+            (reference_id, identity * coverage, coverage, identity)
+        )
+    best_reference, _, query_coverage, _ = sorted(
+        ranked_references,
+        key=lambda row: (-row[1], -row[2], -row[3], row[0]),
+    )[0]
 
-    # 找出对齐数量最多的 reference
-    best_reference_count = max(reference_stats.keys(), key=lambda ref: reference_stats[ref][0])
-
-    # 如果一致，直接返回
-    if best_reference_length == best_reference_count:
-        best_reference = best_reference_length
-    else:
-        # 否则优先选总匹配长度最大者
-        best_reference = best_reference_length
-
-    match_ratio = reference_stats[best_reference][1] / unitig_len
-
-    if match_ratio < min_match_ratio:
+    if query_coverage < min_match_ratio:
         return None, None
 
-    return best_reference, match_ratio
+    return best_reference, query_coverage
 
 
 def find_lis_with_threshold(arr, min_distance):

@@ -11,7 +11,12 @@ class ClusteringTests(unittest.TestCase):
             [AllelicBin("chr1", 0, 100, ("d", "b", "a", "c"))],
             {"a": 1, "b": 1, "c": 1, "d": 1},
             {"a": "haplotig", "b": "haplotig", "c": "haplotig", "d": "haplotig"},
-            {},
+            {
+                ("a", "external_a"): 1,
+                ("b", "external_b"): 1,
+                ("c", "external_c"): 1,
+                ("d", "external_d"): 1,
+            },
             {"a": 1, "b": 1, "c": 1, "d": 1},
             ploidy=4,
             score_mode="raw",
@@ -43,7 +48,10 @@ class ClusteringTests(unittest.TestCase):
             rows,
             {"collapsed": 2, "hap": 1},
             {"collapsed": "diplotig", "hap": "haplotig"},
-            {},
+            {
+                ("collapsed", "external_collapsed"): 1,
+                ("hap", "external_hap"): 1,
+            },
             {"collapsed": 2, "hap": 2},
             ploidy=3,
             score_mode="raw",
@@ -63,6 +71,7 @@ class ClusteringTests(unittest.TestCase):
         dosage = {"a1": 1, "a2": 1, "candidate": 1}
         states = {"a1": "haplotig", "a2": "haplotig", "candidate": "haplotig"}
         links = {("candidate", "a1"): 100.0, ("candidate", "a2"): 60.0}
+        links.update({("a1", "external_1"): 1.0, ("a2", "external_2"): 1.0})
         re_sites = {"a1": 100, "a2": 10, "candidate": 10}
         raw = cluster_allelic_bins(
             rows,
@@ -108,7 +117,10 @@ class ClusteringTests(unittest.TestCase):
             rows,
             {"anchor1": 1, "anchor2": 1, "unsupported": 1},
             {"anchor1": "haplotig", "anchor2": "haplotig", "unsupported": "haplotig"},
-            {},
+            {
+                ("anchor1", "external_1"): 1,
+                ("anchor2", "external_2"): 1,
+            },
             {"anchor1": 10, "anchor2": 10, "unsupported": 10},
             ploidy=2,
             score_mode="raw",
@@ -148,13 +160,32 @@ class ClusteringTests(unittest.TestCase):
         self.assertEqual(decision.selected_groups, ())
 
     def test_insufficient_capacity_never_creates_partial_copy_assignment(self) -> None:
-        rows = [AllelicBin("chr1", 0, 100, ("u2", "u3"))]
+        rows = [
+            AllelicBin("chr1", 0, 100, ("a1", "a2", "a3", "a4")),
+            AllelicBin("chr1", 100, 200, ("u2", "u3")),
+        ]
         result = cluster_allelic_bins(
             rows,
-            {"u2": 2, "u3": 3},
-            {"u2": "diplotig", "u3": "triplotig"},
-            {},
-            {"u2": 2, "u3": 2},
+            {"a1": 1, "a2": 1, "a3": 1, "a4": 1, "u2": 2, "u3": 3},
+            {
+                "a1": "haplotig",
+                "a2": "haplotig",
+                "a3": "haplotig",
+                "a4": "haplotig",
+                "u2": "diplotig",
+                "u3": "triplotig",
+            },
+            {
+                ("a1", "external_1"): 1,
+                ("a2", "external_2"): 1,
+                ("a3", "external_3"): 1,
+                ("a4", "external_4"): 1,
+                ("u3", "a1"): 10,
+                ("u3", "a2"): 9,
+                ("u3", "a3"): 8,
+                ("u3", "a4"): 1,
+            },
+            {"a1": 2, "a2": 2, "a3": 2, "a4": 2, "u2": 2, "u3": 2},
             ploidy=4,
             score_mode="raw",
             min_score=0,
@@ -175,7 +206,12 @@ class ClusteringTests(unittest.TestCase):
             rows,
             {"a1": 1, "a2": 1, "candidate": 1},
             {"a1": "haplotig", "a2": "haplotig", "candidate": "haplotig"},
-            {("candidate", "a1"): 10, ("candidate", "a2"): 10},
+            {
+                ("a1", "external_1"): 1,
+                ("a2", "external_2"): 1,
+                ("candidate", "a1"): 10,
+                ("candidate", "a2"): 10,
+            },
             {"a1": 10, "a2": 10, "candidate": 10},
             ploidy=2,
             score_mode="raw",
@@ -188,6 +224,32 @@ class ClusteringTests(unittest.TestCase):
         self.assertEqual(decision.status, "ambiguous")
         self.assertEqual(decision.reason, "non_unique_boundary")
         self.assertEqual(decision.selected_groups, ())
+
+    def test_no_hic_unitigs_cannot_seed_haplotype_groups(self) -> None:
+        result = cluster_allelic_bins(
+            [AllelicBin("chr1", 0, 100, ("a", "b"))],
+            {"a": 1, "b": 1},
+            {"a": "haplotig", "b": "haplotig"},
+            {},
+            {"a": 1, "b": 1},
+            ploidy=2,
+            score_mode="raw",
+            min_score=0,
+            min_margin=0,
+        )
+        self.assertEqual(
+            {decision.reason for decision in result.decisions},
+            {"no_hic_seed_support"},
+        )
+        self.assertTrue(
+            all(
+                decision.status == "locus_assigned_haplotype_unresolved"
+                for decision in result.decisions
+            )
+        )
+        self.assertTrue(
+            all(not unitigs for _, unitigs in result.group_unitigs)
+        )
 
 
 if __name__ == "__main__":

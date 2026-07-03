@@ -102,7 +102,10 @@ class LocusRescueTests(unittest.TestCase):
             thresholds=self.thresholds,
         )
         self.assertEqual(rescued.status, "locus_assigned_haplotype_unresolved")
-        self.assertEqual(rescued.rescue_class, "rescued_haplotig")
+        self.assertEqual(
+            rescued.rescue_class,
+            "low_coverage_haplotig_candidate",
+        )
         self.assertIsNone(rescued.assigned_group)
 
     def test_only_extra_group_specific_evidence_can_rescue_group(self) -> None:

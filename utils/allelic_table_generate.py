@@ -10,10 +10,11 @@ description: 通过划分染色体窗口的形式，找到 allelic contig
 import re
 from collections import defaultdict
 import os
-import numpy as np
 import argparse
+from statistics import median
 
 from phap_core.paf import parse_paf_line as parse_paf_record
+from phap_core.locus_rescue import interval_union_length
 
 '''
 alignment filter:
@@ -53,7 +54,7 @@ def parse_paf_line(
         return None
 
     ## filter: min alignment length
-    if record.matching_bases < min_align_length:
+    if record.alignment_block_length < min_align_length:
         return None
 
     ## filter: min unitig length
@@ -117,8 +118,8 @@ def filter_longest_reference_per_contig(alignments):
 
 
 def mad(arr):
-    median = np.median(arr)
-    return np.median(np.abs(arr - median))
+    center = median(arr)
+    return median(abs(value - center) for value in arr)
 
 
 def filter_outliers(alignments):
@@ -128,10 +129,10 @@ def filter_outliers(alignments):
     target_starts = [aln['target_start'] for aln in alignments]
     target_ends = [aln['target_end'] for aln in alignments]
 
-    start_median = np.median(target_starts)
+    start_median = median(target_starts)
     start_mad = mad(target_starts)
 
-    end_median = np.median(target_ends)
+    end_median = median(target_ends)
     end_mad = mad(target_ends)
 
     # for aln in alignments:
@@ -167,7 +168,7 @@ def assign_to_bins_and_filter(alignments, bin_size):
         split_aligns = split_alignment(aln, bin_size)
         for split_aln in split_aligns:
             bin_start = (split_aln['target_start'] // bin_size) * bin_size
-            bin_end = bin_start + bin_size
+            bin_end = min(bin_start + bin_size, split_aln['target_len'])
             bin_key = (split_aln['target_id'], bin_start, bin_end)
             bins[bin_key].append(split_aln)
 
@@ -231,17 +232,26 @@ def get_top_n_contigs_per_bin1(merged_bins, dic_contig_type, top_n):
 
 
 def merge_contig_alignments(bins, dic_contig_type):
-    merged_bins = defaultdict(lambda: defaultdict(int))
+    merged_intervals = defaultdict(lambda: defaultdict(list))
     for bin_key, alignments in bins.items():
         for aln in alignments:
-            merged_bins[bin_key][aln['query_id']] += aln['match_len']
+            merged_intervals[bin_key][aln['query_id']].append(
+                (aln['target_start'], aln['target_end'])
+            )
+    merged_bins = defaultdict(lambda: defaultdict(int))
+    for bin_key, unitig_intervals in merged_intervals.items():
+        for query_id, intervals in unitig_intervals.items():
+            merged_bins[bin_key][query_id] = interval_union_length(intervals)
     return merged_bins
 
 
 def get_top_n_contigs_per_bin(merged_bins, dic_contig_type, top_n):
     top_contigs_per_bin = {}
     for bin_key, contigs in merged_bins.items():
-        sorted_contigs = sorted(contigs.items(), key=lambda x: x[1], reverse=True)
+        sorted_contigs = sorted(
+            contigs.items(),
+            key=lambda item: (-item[1], item[0]),
+        )
         top_contigs_per_bin[bin_key] = sorted_contigs[:top_n]
     return top_contigs_per_bin
 
@@ -262,14 +272,18 @@ def write_top_contigs_per_bin(file_paf, min_align_length, min_unitig_length, bin
     out_allelic = open(out_allelic_table, 'w')
     with open(output_file, 'w') as out:
         out.write("#target_id\tbin_start\tbin_end\tquery_id\tmatch_len\n")
-        for bin_key, contigs in top_contigs_per_bin.items():
+        for bin_key in sorted(top_contigs_per_bin):
+            contigs = top_contigs_per_bin[bin_key]
             target_id, bin_start, bin_end = bin_key
             if target_id not in scffolds_chr: continue
-            out_allelic.write(f'{target_id}\t{bin_start}\t{bin_end}\t')
+            unitig_ids = []
             for query_id, match_len in contigs:
                 out.write(f"{target_id}\t{bin_start}\t{bin_end}\t{query_id}\t{match_len}\n")
-                out_allelic.write(query_id + '\t')
-            out_allelic.write('\n')
+                unitig_ids.append(query_id)
+            out_allelic.write(
+                '\t'.join((target_id, str(bin_start), str(bin_end), *unitig_ids))
+                + '\n'
+            )
     out_allelic.close()
 
 

@@ -62,9 +62,9 @@ class PafRecord:
 
     @property
     def is_primary(self) -> bool:
-        """Whether the record explicitly declares ``tp:A:P``."""
+        """Whether minimap2 declares a primary normal/inversion alignment."""
 
-        return self.alignment_type == "P"
+        return self.alignment_type in {"P", "I"}
 
     def to_line(self) -> str:
         """Return the original record without its line ending."""
@@ -219,9 +219,13 @@ def select_primary_records(
     decisions = []
     for record in records:
         alignment_type = record.alignment_type
-        if alignment_type == "P":
+        if alignment_type in {"P", "I"}:
             status = "accepted"
-            reason = "primary_alignment"
+            reason = (
+                "primary_alignment"
+                if alignment_type == "P"
+                else "primary_inversion"
+            )
             accepted.append(record)
         elif alignment_type is None and not require_tp:
             status = "accepted"
@@ -233,6 +237,9 @@ def select_primary_records(
         elif alignment_type == "S":
             status = "excluded"
             reason = "secondary_alignment"
+        elif alignment_type == "i":
+            status = "excluded"
+            reason = "secondary_inversion"
         else:
             status = "excluded"
             reason = "non_primary_alignment"

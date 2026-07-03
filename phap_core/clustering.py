@@ -83,9 +83,9 @@ def cluster_allelic_bins(
     groups: dict[str, set[str]] = {group_id: set() for group_id in group_ids}
     memberships: dict[str, Tuple[str, ...]] = {}
     decisions: dict[str, ClusterDecision] = {}
+    seeded = False
 
     for row in rows:
-        seeding_row = not any(groups.values())
         occupied = {
             group_id
             for unitig_id in row.unitigs
@@ -98,6 +98,50 @@ def cluster_allelic_bins(
                 unitig_id,
             ),
         )
+        if not seeded:
+            valid_seed_unitigs = tuple(
+                unitig_id
+                for unitig_id in new_unitigs
+                if (
+                    dosage_by_unitig.get(unitig_id) is not None
+                    and 1 <= _sortable_dosage(dosage_by_unitig.get(unitig_id)) <= ploidy
+                )
+            )
+            seed_copy_count = sum(
+                _sortable_dosage(dosage_by_unitig.get(unitig_id))
+                for unitig_id in valid_seed_unitigs
+            )
+            unsupported_seed_unitigs = {
+                unitig_id
+                for unitig_id in valid_seed_unitigs
+                if (
+                    dosage_by_unitig.get(unitig_id) != ploidy
+                    and not _has_hic_support(unitig_id, pair_links)
+                )
+            }
+            valid_seed = (
+                seed_copy_count == ploidy and not unsupported_seed_unitigs
+            )
+            if not valid_seed:
+                for unitig_id in new_unitigs:
+                    dosage = dosage_by_unitig.get(unitig_id)
+                    source_state = source_states.get(unitig_id, "missing_dosage")
+                    if dosage is None or not 1 <= dosage <= ploidy:
+                        reason = "invalid_or_missing_dosage"
+                    elif unitig_id in unsupported_seed_unitigs:
+                        reason = "no_hic_seed_support"
+                    else:
+                        reason = "no_valid_seed"
+                    decisions[unitig_id] = _unresolved_decision(
+                        unitig_id,
+                        row,
+                        source_state,
+                        dosage,
+                        score_mode,
+                        reason,
+                    )
+                continue
+
         for unitig_id in new_unitigs:
             dosage = dosage_by_unitig.get(unitig_id)
             source_state = source_states.get(unitig_id, "missing_dosage")
@@ -126,7 +170,7 @@ def cluster_allelic_bins(
                 )
                 continue
 
-            if seeding_row:
+            if not seeded:
                 selected = available[:dosage]
                 decision = ClusterDecision(
                     unitig_id=unitig_id,
@@ -196,6 +240,8 @@ def cluster_allelic_bins(
             memberships[unitig_id] = tuple(sorted(selected))
             occupied.update(selected)
             decisions[unitig_id] = decision
+        if not seeded and any(groups.values()):
+            seeded = True
 
     observed = {unitig_id for row in rows for unitig_id in row.unitigs}
     if observed != set(decisions):
@@ -220,7 +266,13 @@ def _unresolved_decision(
 ) -> ClusterDecision:
     status = (
         "locus_assigned_haplotype_unresolved"
-        if reason in {"no_hic_support", "invalid_or_missing_dosage"}
+        if reason
+        in {
+            "no_hic_support",
+            "invalid_or_missing_dosage",
+            "no_hic_seed_support",
+            "no_valid_seed",
+        }
         else "ambiguous"
     )
     return ClusterDecision(
@@ -253,6 +305,18 @@ def _links_for_candidate(
 
 def _sortable_dosage(dosage: Optional[int]) -> int:
     return dosage if dosage is not None and dosage > 0 else 0
+
+
+def _has_hic_support(
+    unitig_id: str,
+    pair_links: Mapping[Tuple[str, str], float],
+) -> bool:
+    return any(
+        count > 0
+        and left != right
+        and unitig_id in {left, right}
+        for (left, right), count in pair_links.items()
+    )
 
 
 def _validate_rows(rows: Sequence[AllelicBin]) -> None:

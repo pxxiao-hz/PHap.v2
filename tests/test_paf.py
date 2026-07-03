@@ -43,17 +43,24 @@ class PafParsingTests(unittest.TestCase):
         records = parse_paf_lines(
             [
                 "p\t100\t0\t80\t+\tchr1\t1000\t0\t80\t80\t80\t60\ttp:A:P\n",
+                "i1\t100\t0\t80\t-\tchr1\t1000\t0\t80\t80\t80\t60\ttp:A:I\n",
                 "s\t100\t0\t80\t+\tchr1\t1000\t0\t80\t80\t80\t60\ttp:A:S\n",
+                "i2\t100\t0\t80\t-\tchr1\t1000\t0\t80\t80\t80\t60\ttp:A:i\n",
                 "m\t100\t0\t80\t+\tchr1\t1000\t0\t80\t80\t80\t60\n",
             ]
         )
         accepted, audit = select_primary_records(records, require_tp=True)
-        self.assertEqual(tuple(record.query_name for record in accepted), ("p",))
+        self.assertEqual(
+            tuple(record.query_name for record in accepted),
+            ("i1", "p"),
+        )
         self.assertEqual(
             {row.query_name: row.reason for row in audit},
             {
                 "p": "primary_alignment",
+                "i1": "primary_inversion",
                 "s": "secondary_alignment",
+                "i2": "secondary_inversion",
                 "m": "missing_tp_tag",
             },
         )

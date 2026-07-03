@@ -309,7 +309,7 @@ def decide_locus_rescue(
             }
         )
     )
-    rescue_class = "rescued_haplotig" if low_coverage else None
+    rescue_class = "low_coverage_haplotig_candidate" if low_coverage else None
     if conflicting_loci or len(compatible_groups) > 1:
         return _decision(
             unitig_id,

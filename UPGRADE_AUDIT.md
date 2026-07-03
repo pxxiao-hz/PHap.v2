@@ -34,10 +34,23 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
   保留为 `locus_assigned_haplotype_unresolved`，并写出 ID、FASTA、reason；
 - group 文件解析显式区分带 count 和不带 count 两个阶段，输出稳定排序。
 
+第四批本地 PAF/locus correctness 修复已完成：
+
+- 新增 lossless、tag-aware PAF parser；`tp` 按标签名读取，缺失、secondary、
+  malformed tag 和越界半开区间均显式审计或报错；
+- locus 候选从完整 PAF 构建，不再先丢弃 next-best target；正向/反向链同时检查
+  query 与 oriented target 的共线性；
+- query coverage 使用 interval union，identity 使用
+  `sum(nmatch) / sum(alignment_block_length)`，并实际应用 identity、coverage 和
+  best-minus-next score margin；
+- mT2T 仅决定 locus routing，不直接分配 haplotype group；low-coverage 只有在
+  可选独立 read support 达标时才标记为候选，仍不强制 dosage 1；
+- allelic-bin target support 改用 clipped target interval union；首个 group seed
+  也不再允许完全无 Hi-C 的非全倍性 unitig 绕过证据检查。
+
 当前仍不能宣称任意倍性生产数据端到端已验证：尚未运行真实全流程 benchmark；
-现有 PAF/LIS 生成 locus evidence 的实现仍需改为共享 tag-aware parser 和
-interval-union coverage，之后才能启用 identity/coverage/next-best margin 驱动的
-严格 mT2T rescue。
+严格 locus routing 已接入活动 cluster 路径，但旧 LIS 分段启发式仍需以真实数据
+验证，`scripts/util.py` 中 mT2T overlap backend 的独立 PAF/merge 逻辑也尚未迁移。
 
 下面的问题清单仍保留为基线审计记录。P0-1、P0-2 和 P0-4 的活动路径已在本地
 修复；其余科学正确性问题仍待处理。
@@ -83,6 +96,8 @@ supplementary、duplicate、MAPQ 或最佳比对。一个多重比对 read 可�
 
 ### P0-3 dosage 归一化计算后未使用
 
+**状态：活动 clustering/re-clustering 路径已在第三批本地修复。**
+
 `scripts/phap_cluster.py:138-150` 调用 `adjust_hic_signals()` 后丢弃返回值，后续仍
 使用原始 links。当前 dosage 权重实际上没有生效。
 
@@ -123,6 +138,8 @@ overlap；结果还依赖遍历顺序。
 
 ### P0-7 PAF 覆盖率和 primary 标记解析不可靠
 
+**状态：活动 cluster locus 路径已在第四批本地修复；mT2T overlap backend 待迁移。**
+
 多个模块把 alignment match length 直接累加，重叠 alignment 会重复计数，比例可
 被放大；多个位置使用 `parts[16][-1]` 判断 primary/supplementary，但 PAF optional
 tag 没有固定列号。
@@ -134,8 +151,10 @@ tag 没有固定列号。
 - `utils/allelic_table_generate.py`
 - `utils/extract_chr_from_putg.py`
 
-修复方向：实现一个共享 PAF parser，按 tag 名解析 `tp`，覆盖率使用 interval
-union，并对缺失 tag、乱序 tag、overlap alignment 建 fixture。
+当前 cluster 流程从完整 PAF 生成 alignment、candidate、decision 和 routing
+审计；optional tag 顺序、缺失 `tp`、secondary、overlap union、正反向 chain、
+竞争 locus 和确定性输出均有回归测试。`scripts/util.py` 的 overlap/mT2T backend
+仍保留旧实现，必须在独立修复中迁移，不能据此宣称 mT2T join 已修复。
 
 ### P0-8 流程存在明确的可执行性故障
 
