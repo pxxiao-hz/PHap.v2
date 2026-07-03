@@ -14,8 +14,22 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 - 移除 read assembly/scaffolding 路径中的个人绝对工具路径，修复 `pigp` 拼写；
 - 修正文档中的仓库地址、重复 subcommand、Hi-C mate 文件和不可移植示例路径。
 
-下面的问题清单仍保留为基线审计记录。P0-1 至 P0-7 的科学正确性修复不属于第一批
-工程 PR，尚未实施。
+第二批本地 correctness 修复已完成：
+
+- dosage 从固定 `base_value=28` 改为 window-level、ploidy-aware 的自动间距拟合，
+  同时保留显式 `--haploid-depth` 覆盖；弱识别模型默认停止，不静默猜测；
+- collapsed read 改为每种数据类型全局一次、确定性且互斥的分配，冲突和无支持记录
+  进入显式审计输出；
+- 新增 `phap dosage`、window/model 审计、unitig candidate/read assignment/group
+  summary 审计及相应回归测试。
+
+当前仍不能据此宣称任意倍性端到端可用：clustering/re-clustering 中仍有固定四组和
+未知 dosage 回退逻辑。新 read-assignment 会拒绝这些不守恒/无效记录，但下一批仍
+需让 clustering 将它们保留到显式 ambiguous/unassigned 输出，而不是按 haplotig
+处理。
+
+下面的问题清单仍保留为基线审计记录。P0-1 和 P0-2 已在本地修复；其余科学
+正确性问题仍待处理。
 
 ## 1. 当前基线
 
@@ -32,22 +46,29 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 
 ### P0-1 collapsed unitig 的 reads 没有被互斥拆分
 
+**状态：已在第二批本地修复。**
+
 `utils/phase_reads_assemble_anchor.py:249-265` 对每个 group 独立调用
 `split_reads()`，每次使用相同 seed。一个 diplotig/triplotig/tetraplotig 同时出现
 在多个 group 时，各 group 会得到同一个 `1/dosage` 子集，而不是不同的互斥子集；
 其余 reads 被丢弃。这会直接造成 haplotype 间污染和覆盖不足。
 
-修复方向：以 `(unitig, data_type)` 为单位只洗牌一次，再按目标 group 数量做完整、
-互斥、确定性的分区；输出 union、intersection、unassigned 统计并加回归测试。
+当前实现先验证 unitig dosage 与候选 group 数守恒，再以 read/read-pair 为单位全局
+处理一次。兼容候选组使用交集解析，collapsed reads 使用带 seed 的稳定 BLAKE2
+分配；各 group 互斥，ambiguous/unassigned 保留在审计表中。
 
 ### P0-2 read phasing 接收所有长读长比对
+
+**状态：已在第二批本地修复。**
 
 `utils/phase_reads_assemble_anchor.py:114-129` 未过滤 unmapped、secondary、
 supplementary、duplicate、MAPQ 或最佳比对。一个多重比对 read 可进入多个 unitig，
 随后进入多个 haplotype。Hi-C 路径也没有完整、可配置的质量策略。
 
-修复方向：先定义并测试 primary/best-hit/ambiguous 策略；对跨 group 的 read 冲突
-单独报告，不允许通过 `set.update()` 静默复制。
+当前策略仅使用 mapped、primary、non-supplementary、non-duplicate、non-QC-fail
+且达到 `--min_mapq` 的比对；Hi-C mates 作为一个 pair entity 处理。跨 group
+冲突单独报告，不允许通过 `set.update()` 静默复制。non-proper Hi-C alignment
+有意保留，因为有效 Hi-C contact 不要求传统 paired-end 的 proper-pair 几何关系。
 
 ### P0-3 dosage 归一化计算后未使用
 
@@ -249,3 +270,35 @@ N50 只能作为连续性指标之一，不能单独作为“组装效果提升�
 4. 统一 worker 失败传播；
 5. 修复硬编码路径、`pigp`、缺失脚本入口和文档命令；
 6. 加入 tiny FASTA/PAF/group fixtures，为下一批 P0 correctness fixes 建安全网。
+
+## 8. mT2T 与 MGA 后续设计依据
+
+PHap 论文中的 mT2T 和 MGA 都生成 haplotype-mixed/mosaic reference。两者在
+PHap 流水线中的**功能角色可以互换**：都可为后续 p_utg 定位、allelic table
+构建和分型提供一套混合单倍型伪 T2T 坐标。它们不是同一算法，输入契约也不同：
+
+- PHap 当前 mT2T 以 `p_ctg` 为输入，先用 Mash 筛选候选 contig pair，再依据
+  minimap2 overlap 构图并连接序列。
+- [MGA](https://github.com/ZhangZhenmiao/MGA) 直接以 HiFi reads 为输入，基于 LJA
+  的 multiplex de Bruijn graph，执行 read/graph cleaning、detouring、dewhirling、
+  decoupling、broken-tip repair、short-edge contraction、scaffolding 和 cognate
+  contig deduplication。
+- [MGA 论文](https://link.springer.com/article/10.1186/s13059-026-04128-5)
+  讨论的是 diploid haplotype-mixed consensus assembly；尚不能据此假定其 bubble
+  简化和去冗余规则适用于 autotetraploid dosage。
+- MGA 使用 BSD 3-Clause License，但 PHap 不应复制其实现作为本轮修复的一部分。
+  后续应将 MGA 作为显式、可选的外部 backend，记录版本与完整命令，并与 PHap
+  overlap-graph backend 在相同数据上比较完整性、phase switch/misjoin、
+  duplication、read support、连续性和资源使用。
+
+建议将 `phap mt2t` 改为统一 provider 接口：
+
+- `--backend overlap`：输入 `p_ctg`，执行 PHap 原生 Mash/minimap2/oriented
+  overlap graph 流程；
+- `--backend mga`：输入 HiFi reads，调用固定版本的 MGA；
+- 两个 backend 都必须产出规范化的 `mT2T.fa`、运行 manifest、序列 ID mapping
+  和质量统计，之后进入完全相同的 allelic-table/cluster 流程。
+
+原生 overlap backend 仍需完成共享 PAF parser、conflict-aware path extraction
+和序列物化测试。MGA backend 则以外部工具适配、输出规范化和四倍体数据 benchmark
+为主，不要求复制 MGA 内部图算法。

@@ -42,6 +42,13 @@ def parse_args():
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
     parser.add_argument('--process', type=int, default=4, help='The number of processes [4]')
     parser.add_argument('--seed', type=int, default=100, help='Random seed for reproducibility [100]')
+    parser.add_argument('--ploidy', type=int, required=True, help='Genome ploidy')
+    parser.add_argument(
+        '--min_mapq',
+        type=int,
+        default=1,
+        help='Minimum MAPQ for read assignment [1]',
+    )
 
     args = parser.parse_args()
     return args
@@ -107,6 +114,10 @@ def main():
         str(args.process),
         '--seed',
         str(args.seed),
+        '--ploidy',
+        str(args.ploidy),
+        '--min_mapq',
+        str(args.min_mapq),
     ]
     with (step1_dir / 'log_phase_reads_assemble_anchor_out').open('w') as stdout, (
         step1_dir / 'log_phase_reads_assemble_anchor_err'

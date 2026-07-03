@@ -28,13 +28,24 @@ description:
 import argparse
 import logging
 import os
-import random
 import shlex
 from collections import defaultdict
-import pickle
+from pathlib import Path
+from typing import Dict, Iterable, Mapping, Optional, Tuple
 
-import pysam
+import pysam  # type: ignore[import-not-found]
 
+from phap_core.read_assignment import (
+    ReadAssignment,
+    UnitigCandidate,
+    alignment_is_usable,
+    assign_reads,
+    build_unitig_candidates,
+    canonical_read_id,
+    group_assigned_reads,
+    paired_fastq_patterns,
+    parse_unitig_dosages,
+)
 from phap_core.runner import (
     PreflightError,
     require_input_files,
@@ -49,104 +60,166 @@ run_in_parallel = run_shell_commands_parallel
 logging.basicConfig(level=logging.DEBUG, format='%(asctime)s - %(levelname)s - %(message)s')
 
 
-def output_pickle(dict_, to):
-    with open(to, 'wb') as fpkl:
-        pickle.dump(dict_, fpkl)
-    logging.info(f'Successfully saved dictionary to {to}')
+def parse_contig_type_based_on_dosage(
+    file_contig_type: str,
+) -> Tuple[Dict[str, Optional[int]], Dict[str, str]]:
+    """Parse numeric dosage or legacy contig types without guessing invalid calls."""
+    with open(file_contig_type) as source:
+        dosage_by_unitig, source_labels = parse_unitig_dosages(source)
+    logging.info('Parsed dosage for %d unitigs', len(dosage_by_unitig))
+    return dosage_by_unitig, source_labels
 
 
-def load_pickle_file(file_path):
-    with open(file_path, 'rb') as file:
-        data = pickle.load(file)
-    logging.info(f'Successfully loaded dictionary from {file_path}')
-    return data
-
-
-def parse_contig_type_based_on_dosage(file_contig_type):
-    dic_dosage_contig_type = {}
-    for lines in open(file_contig_type, 'r'):
-        if lines.startswith('contig_ID'):
-            continue
-        else:
+def parse_group_cluster(group_file: str) -> Dict[str, list[str]]:
+    dic_group_ctg: Dict[str, list[str]] = {}
+    with open(group_file) as source:
+        for lines in source:
+            if not lines.strip():
+                continue
             line = lines.strip().split()
-            contig_type = line[2]
-            type_list = ['haplotig', 'diplotig', 'triplotig', 'tetraplotig']
-            if contig_type not in type_list:
-                contig_type = 'haplotig'
-            dic_dosage_contig_type[line[0]] = contig_type
-    logging.info('Parsed contig types successfully')
-    return dic_dosage_contig_type
-
-
-def parse_group_cluster(group_file):
-    dic_group_ctg = {}
-    for lines in open(group_file):
-        line = lines.strip().split()
-        group_name = line[0]
-        dic_group_ctg[group_name] = line[1:]
+            group_name = line[0]
+            if group_name in dic_group_ctg:
+                raise ValueError(f'duplicate group name: {group_name}')
+            dic_group_ctg[group_name] = line[1:]
     logging.info('Parsed group clusters successfully')
     return dic_group_ctg
 
 
-def parse_bam_tgs(bam_file):
-    # 打开 bam 文件
-    bam = pysam.AlignmentFile(bam_file, 'rb')
+def parse_bam_read_unitigs(
+    bam_file: str,
+    min_mapq: int,
+    paired: bool = False,
+) -> Dict[str, set[str]]:
+    """Collect one entity per read/pair under the documented BAM filter policy.
 
-    # 初始化字典存储结果
-    contig_reads_dict = defaultdict(set)
-
-    # 遍历 BAM 文件中的每个比对
-    for read in bam.fetch():
-        contig = bam.get_reference_name(read.reference_id)
-        contig_reads_dict[contig].add(read.query_name)
-
-    # 关闭 BAM 文件
-    bam.close()
-    logging.info(f'Parsed BAM {bam_file} file successfully')
-    return contig_reads_dict
-
-
-def parse_bam_ngs(bam_file):
-    # 打开 bam 文件
-    bam = pysam.AlignmentFile(bam_file, 'rb')
-
-    # 初始化字典存储结果
-    contig_reads_dict = defaultdict(set)
-
-    # 遍历 BAM 文件中的每个比对
-    for read in bam.fetch():
-        # contig = bam.get_reference_name(read.reference_id)
-        # 跳过未比对的 reads
-        if read.is_unmapped or read.mate_is_unmapped:
-            continue
-        # 仅处理第一端的 reads
-        if read.is_read1:
+    Unmapped, secondary, supplementary, duplicate, QC-fail, and alignments
+    below ``min_mapq`` are filtered. Non-proper alignments are intentionally
+    retained because that flag is not meaningful evidence against a Hi-C pair.
+    """
+    read_unitigs: Dict[str, set[str]] = defaultdict(set)
+    with pysam.AlignmentFile(bam_file, 'rb') as bam:
+        for read in bam.fetch(until_eof=True):
+            if read.query_name is None:
+                raise ValueError(f'alignment without query name in {bam_file}')
+            read_id = canonical_read_id(read.query_name, paired=paired)
+            read_unitigs[read_id]  # retain filtered/unmapped entities for audit
+            if not alignment_is_usable(
+                is_unmapped=read.is_unmapped,
+                is_secondary=read.is_secondary,
+                is_supplementary=read.is_supplementary,
+                is_duplicate=read.is_duplicate,
+                is_qcfail=read.is_qcfail,
+                is_proper_pair=read.is_proper_pair,
+                mapping_quality=read.mapping_quality,
+                min_mapq=min_mapq,
+            ):
+                continue
             contig = bam.get_reference_name(read.reference_id)
-            if contig:  # 确保 contig 不为 None
-                contig_reads_dict[contig].add(read.query_name)
-
-        # 仅处理第一端 或独立的单端
-        # if read.is_read1 or read.is_unmapped or read.mate_is_unmapped:
-        #     contig_reads_dict[contig].add(read.query_name)
-    # 关闭 BAM 文件
-    bam.close()
-    logging.info(f'Parsed BAM {bam_file} file successfully')
-    return contig_reads_dict
+            if contig is not None:
+                read_unitigs[read_id].add(contig)
+    logging.info('Parsed %d read entities from %s', len(read_unitigs), bam_file)
+    return read_unitigs
 
 
-def split_reads(reads, fraction, seed=None):
-    """将 HiFi reads 随机分割成指定的比例"""
-    reads_list = list(reads)
-    num_reads = len(reads_list)
-    split_point = int(num_reads * fraction)
-    # 设置种子，可以对结果进行重现
-    if seed is not None:
-        random.seed(seed)
-    random.shuffle(reads_list)
-    return set(reads_list[:split_point]), set(reads_list[split_point:])
+def atomic_write_lines(path: str, lines: Iterable[str]) -> None:
+    target = Path(path)
+    temporary = target.with_name(target.name + '.tmp')
+    with temporary.open('w') as output:
+        for line in lines:
+            output.write(line)
+            output.write('\n')
+    os.replace(temporary, target)
 
 
-def parse_args():
+def write_assignment_audits(
+    candidates: Mapping[str, UnitigCandidate],
+    source_labels: Mapping[str, str],
+    assignments: Iterable[ReadAssignment],
+    groups: Iterable[str],
+    *,
+    seed: int,
+    ploidy: int,
+    min_mapq: int,
+    filter_policy: str,
+) -> None:
+    assignment_list = sorted(assignments, key=lambda item: (item.modality, item.read_id))
+    candidate_lines = [
+        'unitig_ID\tdosage\tcandidate_groups\tstatus\treason\tsource_label'
+    ]
+    for unitig in sorted(candidates):
+        candidate = candidates[unitig]
+        dosage = '' if candidate.dosage is None else str(candidate.dosage)
+        candidate_lines.append(
+            '\t'.join(
+                [
+                    candidate.unitig_id,
+                    dosage,
+                    ','.join(candidate.groups),
+                    candidate.status,
+                    candidate.reason,
+                    source_labels.get(unitig, 'missing'),
+                ]
+            )
+        )
+    atomic_write_lines('unitig_candidates.tsv', candidate_lines)
+
+    read_lines = [
+        'read_ID\tmodality\tstatus\tdestination_group\tcandidate_groups\tunitigs\treason'
+    ]
+    for assignment in assignment_list:
+        read_lines.append(
+            '\t'.join(
+                [
+                    assignment.read_id,
+                    assignment.modality,
+                    assignment.status,
+                    assignment.destination_group or '',
+                    ','.join(assignment.candidate_groups),
+                    ','.join(assignment.unitigs),
+                    assignment.reason,
+                ]
+            )
+        )
+    atomic_write_lines('read_assignments.tsv', read_lines)
+
+    group_names = sorted(set(groups))
+    summary_lines = [
+        'modality\tgroup\tassigned_reads\tambiguous_reads\tunassigned_reads\t'
+        'total_entities\tcross_group_overlaps\tcross_group_overlap_rate\t'
+        'estimated_cross_group_contamination_rate\tseed\tploidy\tmin_mapq\t'
+        'filter_policy'
+    ]
+    modalities = sorted({assignment.modality for assignment in assignment_list})
+    for modality in modalities:
+        subset = [item for item in assignment_list if item.modality == modality]
+        ambiguous = sum(item.status == 'ambiguous' for item in subset)
+        unassigned = sum(item.status == 'unassigned' for item in subset)
+        assigned_ids = [
+            item.read_id for item in subset if item.status == 'assigned'
+        ]
+        owner_counts: Dict[str, int] = defaultdict(int)
+        for read_id in assigned_ids:
+            owner_counts[read_id] += 1
+        overlaps = sum(count > 1 for count in owner_counts.values())
+        overlap_rate = overlaps / len(assigned_ids) if assigned_ids else 0.0
+        for group in group_names:
+            assigned = sum(
+                item.status == 'assigned' and item.destination_group == group
+                for item in subset
+            )
+            summary_lines.append(
+                f'{modality}\t{group}\t{assigned}\t0\t0\t{assigned}\t0\t0.000000\t'
+                f'0.000000\t{seed}\t{ploidy}\t{min_mapq}\t{filter_policy}'
+            )
+        summary_lines.append(
+            f'{modality}\tALL\t{len(assigned_ids)}\t{ambiguous}\t{unassigned}\t'
+            f'{len(subset)}\t{overlaps}\t{overlap_rate:.6f}\t'
+            f'{overlap_rate:.6f}\t{seed}\t{ploidy}\t{min_mapq}\t{filter_policy}'
+        )
+    atomic_write_lines('read_assignment_summary.tsv', summary_lines)
+
+
+def parse_args() -> argparse.Namespace:
 
     parser = argparse.ArgumentParser(description="Haplotype assembly and scaffolding of autopolyploid genome")
     parser.add_argument('--bam_hifi', type=str, required=True, help='Path to HiFi bam file')
@@ -163,13 +236,24 @@ def parse_args():
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
     parser.add_argument('--process', type=int, default=4, help='The number of processes [4]')
     parser.add_argument('--seed', type=int, default=100, help='Random seed for reproducibility [100]')
+    parser.add_argument('--ploidy', type=int, required=True, help='Genome ploidy')
+    parser.add_argument(
+        '--min_mapq',
+        type=int,
+        default=1,
+        help='Minimum MAPQ for primary, mapped, non-duplicate alignments [1]',
+    )
 
     args = parser.parse_args()
     return args
 
 
-def main():
+def main() -> None:
     args = parse_args()
+    if args.ploidy < 1:
+        raise SystemExit('phap phase_reads: error: --ploidy must be at least 1')
+    if args.min_mapq < 0:
+        raise SystemExit('phap phase_reads: error: --min_mapq must be non-negative')
     required_tools = [
         'awk',
         'bash',
@@ -200,76 +284,60 @@ def main():
     except PreflightError as error:
         raise SystemExit(f"phap phase_reads: error: {error}") from error
 
-    contig_type_file = 'contig_type.pickle'
-    group_file = 'group_contig_type.pickle'
-    contig_hifi_pickle = 'contig_hifi.pickle'
-    contig_ont_pickle = 'contig_ont.pickle'
-    contig_hic_pickle = 'contig_hic.pickle'
-
-    ### step1: 解析 unitig type
-    if not os.path.isfile(contig_type_file):
-        dic_contig_type = parse_contig_type_based_on_dosage(args.contig_type)
-        output_pickle(dic_contig_type, contig_type_file)
-    dic_contig_type = load_pickle_file(contig_type_file)
-    logging.debug(f'dic_contig_type: {dic_contig_type}')
-
-    ### step2: 解析 group file
-    if not os.path.exists(group_file):
+    try:
+        ### steps 1-3: parse inputs and make one global decision per read entity
+        dic_contig_dosage, source_labels = parse_contig_type_based_on_dosage(
+            args.contig_type
+        )
         dic_group_ctg = parse_group_cluster(args.group)
-        output_pickle(dic_group_ctg, group_file)
-    dic_group_ctg = load_pickle_file(group_file)
-    logging.debug(f'dic_group_ctg: {dic_group_ctg}')
+        candidates = build_unitig_candidates(
+            dic_group_ctg,
+            dic_contig_dosage,
+            ploidy=args.ploidy,
+        )
+        bam_inputs = {
+            'hifi': (args.bam_hifi, False),
+            'ont': (args.bam_ont, False),
+            'hic': (args.bam_hic, True),
+        }
+        assignments_by_modality: Dict[str, Tuple[ReadAssignment, ...]] = {}
+        all_assignments: list[ReadAssignment] = []
+        for modality in sorted(bam_inputs):
+            bam_file, paired = bam_inputs[modality]
+            read_unitigs = parse_bam_read_unitigs(
+                bam_file,
+                min_mapq=args.min_mapq,
+                paired=paired,
+            )
+            assignments = assign_reads(
+                read_unitigs,
+                candidates,
+                modality=modality,
+                seed=args.seed,
+            )
+            assignments_by_modality[modality] = assignments
+            all_assignments.extend(assignments)
 
-    ### step3: 解析 bam file
-    ## HiFi
-    if not os.path.exists(contig_hifi_pickle):
-        dic_contig_hifi = parse_bam_tgs(args.bam_hifi)
-        output_pickle(dic_contig_hifi, contig_hifi_pickle)
-    dic_contig_hifi = load_pickle_file(contig_hifi_pickle)
-    logging.debug(f'dic_contig_hifi: {dic_contig_hifi}')
-    ## ONT
-    if not os.path.exists(contig_ont_pickle):
-        dic_contig_ont = parse_bam_tgs(args.bam_ont)
-        output_pickle(dic_contig_ont, contig_ont_pickle)
-    dic_contig_ont = load_pickle_file(contig_ont_pickle)
-    logging.debug(f'dic_contig_ont: {dic_contig_ont}')
-    ## Hi-C
-    if not os.path.exists(contig_hic_pickle):
-        dic_contig_hic = parse_bam_ngs(args.bam_hic)
-        output_pickle(dic_contig_hic, contig_hic_pickle)
-    dic_contig_hic = load_pickle_file(contig_hic_pickle)
-    logging.debug(f'dic_contig_hic: dic_contig_hic')    # 数据量太大了，注释掉
-
-    ### step4: 输出每个 Group 的 HiFi / ONT / Hi-C reads FASTQ
-    dic_group_hifi = defaultdict(set)
-    dic_group_ont = defaultdict(set)
-    dic_group_hic = defaultdict(set)
-    # dic_remaining_reads = defaultdict(set)
-
-    contig_split_fraction = {
-        'haplotig': 1.0,
-        'diplotig': 0.5,
-        'triplotig': 1 / 3,
-        'tetraplotig': 0.25
-    }
-
-    for group, unitigs in dic_group_ctg.items():
-        for unitig in unitigs:
-            contig_type = dic_contig_type.get(unitig, 'haplotig')
-            fraction = contig_split_fraction.get(contig_type, 1.0)
-            ## HiFi
-            reads_hifi = dic_contig_hifi.get(unitig, set())
-            part1_hifi, part2_hifi = split_reads(reads_hifi, fraction, seed=args.seed)
-            dic_group_hifi[group].update(part1_hifi)
-            # dic_remaining_reads[group].update(part2_hifi)
-            ## ONT
-            reads_ont = dic_contig_ont.get(unitig, set())
-            part1_ont, part2_ont = split_reads(reads_ont, fraction, seed=args.seed+1)
-            dic_group_ont[group].update(part1_ont)
-            ## Hi-C
-            reads_hic = dic_contig_hic.get(unitig, set())
-            part1_hic, part2_hic = split_reads(reads_hic, fraction, seed=args.seed+2)
-            dic_group_hic[group].update(part1_hic)
+        groups = sorted(dic_group_ctg)
+        dic_group_hifi = group_assigned_reads(assignments_by_modality['hifi'], groups)
+        dic_group_ont = group_assigned_reads(assignments_by_modality['ont'], groups)
+        dic_group_hic = group_assigned_reads(assignments_by_modality['hic'], groups)
+        filter_policy = (
+            'filter=unmapped,secondary,supplementary,duplicate,qcfail,'
+            'mapq_below_min;retain=primary_mapped_including_nonproper'
+        )
+        write_assignment_audits(
+            candidates,
+            source_labels,
+            all_assignments,
+            groups,
+            seed=args.seed,
+            ploidy=args.ploidy,
+            min_mapq=args.min_mapq,
+            filter_policy=filter_policy,
+        )
+    except (OSError, ValueError) as error:
+        raise SystemExit(f'phap phase_reads: error: {error}') from error
 
     ont_reads = args.ont
     ont_reads_bn = os.path.basename(ont_reads)
@@ -288,14 +356,12 @@ def main():
     commands = []
     process_seqkit = args.process
     for group, reads in dic_group_hifi.items():
-        with open(f'{group}.HiFi.txt', 'w') as f:
-            f.write('\n'.join(reads) + '\n')
+        atomic_write_lines(f'{group}.HiFi.txt', reads)
         cmd = f'seqkit grep -j {args.threads} -f {group}.HiFi.txt {args.hifi} > {group}.HiFi.fq && pigz -p {args.threads} {group}.HiFi.fq'
         commands.append(cmd)
         logging.info(f'Executing command: {cmd}')
     for group, reads in dic_group_ont.items():
-        with open(f'{group}.ONT.txt', 'w') as f:
-            f.write('\n'.join(reads) + '\n')
+        atomic_write_lines(f'{group}.ONT.txt', reads)
         if args.ont_length != 1 or args.ont_quality != 0:
             cmd = f'seqkit grep -j {args.threads} -f {group}.ONT.txt {ont_reads_filter_gzip} > {group}.ONT.fq && pigz -p {args.threads} {group}.ONT.fq'
         else:
@@ -303,12 +369,22 @@ def main():
         commands.append(cmd)
         logging.info(f'Executing command: {cmd}')
     for group, reads in dic_group_hic.items():
-        with open(f'{group}.Hi-C.1.txt', 'w') as f1:
-            f1.write('/1\n'.join(reads) + '/1' + '\n')
-            # f1.write('\n'.join(reads) + '\n')  # for c88
-        with open(f'{group}.Hi-C.2.txt', 'w') as f2:
-            f2.write('/2\n'.join(reads) + '/2' + '\n')
-            # f2.write('\n'.join(reads) + '\n')  # for c88
+        mate1_patterns = sorted(
+            {
+                pattern
+                for read in reads
+                for pattern in paired_fastq_patterns(read, mate=1)
+            }
+        )
+        mate2_patterns = sorted(
+            {
+                pattern
+                for read in reads
+                for pattern in paired_fastq_patterns(read, mate=2)
+            }
+        )
+        atomic_write_lines(f'{group}.Hi-C.1.txt', mate1_patterns)
+        atomic_write_lines(f'{group}.Hi-C.2.txt', mate2_patterns)
         cmd1 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.1.txt {args.hic1} > {group}.Hi-C.1.fq && pigz -p 5 {group}.Hi-C.1.fq'
         cmd2 = f'seqkit grep -j {args.threads} -f {group}.Hi-C.2.txt {args.hic2} > {group}.Hi-C.2.fq && pigz -p 5 {group}.Hi-C.2.fq'
         commands.append(cmd1)
@@ -340,8 +416,8 @@ def main():
             f'filter_bam {group}.asm/scaffolding/01_hic_mapping/HiC.bam 1 --nm 3 --threads {args.threads} | samtools view - -b -@ {args.threads} -o {group}.asm/scaffolding/01_hic_mapping/HiC.filtered.bam',
             f'cd {group}.asm/scaffolding/02_haphic',
             f'haphic pipeline ../01_hic_mapping/{group}.asm.bp.p_ctg.gfa.fa ../01_hic_mapping/HiC.filtered.bam 1 --threads {args.threads} --processes {args.process} --Nx 100 > log_haphic_out 2> log_haphic_err',
-            f'cd 04.build',
-            f'bash juicebox.sh > log_juicebox_out 2> log_juicebox_err'
+            'cd 04.build',
+            'bash juicebox.sh > log_juicebox_out 2> log_juicebox_err'
         ]
         # 将命令加入到 commands 列表中
         commands.append(" && ".join(cmd_scaffolding))

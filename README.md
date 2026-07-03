@@ -54,6 +54,9 @@ phap --version
 View subcommand-specific options:
 
 ```
+phap dosage --help
+usage: Infer unitig dosage from window-level read depth.
+
 phap mt2t --help
 usage: Get mosaic T2T (mT2T) reference from primary contig assembly (p_ctg).
 

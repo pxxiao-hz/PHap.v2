@@ -32,7 +32,7 @@ class CliSmokeTests(unittest.TestCase):
         self.assertIn("Version: 1.1.0", result.stdout)
 
     def test_subcommand_help_does_not_require_scientific_imports(self) -> None:
-        for command in ("mt2t", "cluster", "phase_reads"):
+        for command in ("dosage", "mt2t", "cluster", "phase_reads"):
             with self.subTest(command=command):
                 result = run_cli(command, "--help")
                 self.assertEqual(result.returncode, 0, result.stderr)

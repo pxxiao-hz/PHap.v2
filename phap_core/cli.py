@@ -11,6 +11,10 @@ from . import __update_time__, __version__
 
 
 COMMANDS = {
+    "dosage": (
+        "scripts.phap_dosage",
+        "Infer unitig copy dosage from window-level read depth.",
+    ),
     "mt2t": (
         "scripts.phap_mT2T",
         "Generate a mosaic T2T reference from a primary contig assembly.",
