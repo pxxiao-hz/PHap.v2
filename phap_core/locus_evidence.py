@@ -27,6 +27,8 @@ class PafAlignmentAudit:
     alignment_type: Optional[str]
     status: str
     reason: str
+    final_status: str
+    final_reason: str
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,8 @@ def evaluate_locus_evidence(
                 alignment_type=record.alignment_type,
                 status=status,
                 reason=reason,
+                final_status="pending" if status == "accepted" else "excluded",
+                final_reason="pending_locus_decision" if status == "accepted" else reason,
             )
         )
 
@@ -152,6 +156,38 @@ def evaluate_locus_evidence(
         if assigned_loci.get(chain.unitig_id) == chain.locus_id
         for record in chain.records
     }
+    assigned_loci_or_none = {
+        decision.unitig_id: decision.assigned_locus for decision in decisions
+    }
+    final_alignment_audit = []
+    for row in alignment_audit:
+        if row.status != "accepted":
+            final_alignment_audit.append(row)
+            continue
+        record_key = (row.source, row.line_number)
+        assigned_locus = assigned_loci_or_none.get(row.unitig_id)
+        if record_key in accepted_record_keys:
+            final_status = "written"
+            final_reason = "selected_assigned_locus"
+        elif assigned_locus is None:
+            final_status = "excluded"
+            final_reason = "unitig_unassigned"
+        else:
+            final_status = "excluded"
+            final_reason = "competing_locus_not_selected"
+        final_alignment_audit.append(
+            PafAlignmentAudit(
+                source=row.source,
+                line_number=row.line_number,
+                unitig_id=row.unitig_id,
+                locus_id=row.locus_id,
+                alignment_type=row.alignment_type,
+                status=row.status,
+                reason=row.reason,
+                final_status=final_status,
+                final_reason=final_reason,
+            )
+        )
     filtered_records = tuple(
         sorted(
             (
@@ -172,7 +208,7 @@ def evaluate_locus_evidence(
     )
     return LocusEvidenceResult(
         allowed_loci=loci,
-        alignment_audit=tuple(alignment_audit),
+        alignment_audit=tuple(final_alignment_audit),
         chains=chains,
         decisions=tuple(decisions),
         filtered_records=filtered_records,

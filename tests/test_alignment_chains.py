@@ -95,6 +95,53 @@ class AlignmentChainTests(unittest.TestCase):
         )[0]
         self.assertFalse(chain.collinear)
 
+    def test_single_alignment_is_a_valid_chain(self) -> None:
+        records = parse_paf_lines(
+            [
+                "u\t1000\t100\t900\t-\tchr1\t2000\t500\t1300"
+                "\t760\t800\t60\ttp:A:I\n",
+            ]
+        )
+        chain = summarize_paf_chains(
+            records,
+            max_query_gap=0,
+            max_target_gap=0,
+        )[0]
+        self.assertTrue(chain.collinear)
+        self.assertEqual(chain.record_count, 1)
+
+    def test_forward_chain_rejects_endpoint_regression(self) -> None:
+        records = parse_paf_lines(
+            [
+                "u\t1000\t0\t700\t+\tchr1\t2000\t0\t700"
+                "\t665\t700\t60\ttp:A:P\n",
+                "u\t1000\t500\t600\t+\tchr1\t2000\t800\t900"
+                "\t95\t100\t60\ttp:A:P\n",
+            ]
+        )
+        chain = summarize_paf_chains(
+            records,
+            max_query_gap=1000,
+            max_target_gap=1000,
+        )[0]
+        self.assertFalse(chain.collinear)
+
+    def test_reverse_chain_rejects_target_endpoint_regression(self) -> None:
+        records = parse_paf_lines(
+            [
+                "u\t1000\t0\t400\t-\tchr1\t2000\t900\t1300"
+                "\t380\t400\t60\ttp:A:P\n",
+                "u\t1000\t400\t800\t-\tchr1\t2000\t800\t1400"
+                "\t380\t400\t60\ttp:A:P\n",
+            ]
+        )
+        chain = summarize_paf_chains(
+            records,
+            max_query_gap=1000,
+            max_target_gap=1000,
+        )[0]
+        self.assertFalse(chain.collinear)
+
     def test_target_selection_is_length_then_id_deterministic(self) -> None:
         records = parse_paf_lines(
             [

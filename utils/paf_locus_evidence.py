@@ -76,7 +76,8 @@ def write_outputs(
     _atomic_write_lines(
         alignment_audit,
         [
-            "source\tline\tunitig_ID\tlocus_ID\ttp\tstatus\treason",
+            "source\tline\tunitig_ID\tlocus_ID\ttp\tstatus\treason\t"
+            "final_status\tfinal_reason",
             *(
                 "\t".join(
                     (
@@ -87,6 +88,8 @@ def write_outputs(
                         row.alignment_type or ".",
                         row.status,
                         row.reason,
+                        row.final_status,
+                        row.final_reason,
                     )
                 )
                 for row in result.alignment_audit
@@ -98,13 +101,25 @@ def write_outputs(
         for decision in result.decisions
         for candidate in decision.candidates
     }
+    decisions_by_unitig = {
+        decision.unitig_id: decision for decision in result.decisions
+    }
     candidate_lines = [
         "unitig_ID\tlocus_ID\tstrand\ttarget_start\ttarget_end\trecord_count\t"
         "matching_bases\talignment_block_bases\tidentity\tunion_query_bases\t"
-        "query_coverage\tscore\tcollinear\tmeets_thresholds"
+        "query_coverage\tscore\tcollinear\tmeets_thresholds\t"
+        "selected_for_output\tselection_reason"
     ]
     for chain in result.chains:
         candidate = candidate_status[(chain.unitig_id, chain.locus_id)]
+        decision = decisions_by_unitig[chain.unitig_id]
+        selected = decision.assigned_locus == chain.locus_id
+        if selected:
+            selection_reason = "selected_assigned_locus"
+        elif decision.assigned_locus is None:
+            selection_reason = "unitig_unassigned"
+        else:
+            selection_reason = "competing_locus_not_selected"
         candidate_lines.append(
             "\t".join(
                 (
@@ -122,6 +137,8 @@ def write_outputs(
                     f"{chain.score:.12g}",
                     str(chain.collinear).lower(),
                     str(candidate.meets_thresholds).lower(),
+                    str(selected).lower(),
+                    selection_reason,
                 )
             )
         )

@@ -171,8 +171,43 @@ class LocusEvidenceTests(unittest.TestCase):
             tuple(row.reason for row in result.alignment_audit),
             ("chain_candidate", "duplicate_alignment"),
         )
+        self.assertEqual(
+            tuple(row.final_status for row in result.alignment_audit),
+            ("written", "excluded"),
+        )
+        self.assertEqual(
+            tuple(row.final_reason for row in result.alignment_audit),
+            ("selected_assigned_locus", "duplicate_alignment"),
+        )
         self.assertEqual(result.chains[0].record_count, 1)
         self.assertEqual(len(result.filtered_records), 1)
+
+    def test_unassigned_chain_records_have_a_final_exclusion_reason(self) -> None:
+        records = parse_paf_lines(
+            [
+                "u\t1000\t0\t500\t+\tchr1\t100000\t0\t500"
+                "\t475\t500\t60\ttp:A:P\n",
+                "u\t1000\t500\t1000\t-\tchr1\t100000\t500\t1000"
+                "\t475\t500\t60\ttp:A:P\n",
+            ]
+        )
+        result = evaluate_locus_evidence(
+            records,
+            unitig_ids=("u",),
+            source_states={"u": "haplotig"},
+            independent_read_support={},
+            allowed_loci=("chr1",),
+            thresholds=self.thresholds,
+            min_query_length=1,
+            min_alignment_block_length=1,
+            max_query_gap=1000,
+            max_target_gap=1000,
+        )
+        self.assertEqual(result.filtered_records, ())
+        self.assertEqual(
+            tuple(row.final_reason for row in result.alignment_audit),
+            ("unitig_unassigned", "unitig_unassigned"),
+        )
 
     def test_outputs_are_byte_stable_when_input_order_changes(self) -> None:
         lines = [

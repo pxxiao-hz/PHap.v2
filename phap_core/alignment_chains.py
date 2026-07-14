@@ -195,15 +195,23 @@ def _is_collinear(
     max_target_gap: int,
 ) -> bool:
     for previous, current in zip(records, records[1:]):
+        if current.query_end < previous.query_end:
+            return False
         query_gap = current.query_start - previous.query_end
         if query_gap > max_query_gap:
             return False
         if strand == "+":
-            if current.target_start < previous.target_start:
+            if (
+                current.target_start < previous.target_start
+                or current.target_end < previous.target_end
+            ):
                 return False
             target_gap = current.target_start - previous.target_end
         elif strand == "-":
-            if current.target_start > previous.target_start:
+            if (
+                current.target_start > previous.target_start
+                or current.target_end > previous.target_end
+            ):
                 return False
             target_gap = previous.target_start - current.target_end
         else:

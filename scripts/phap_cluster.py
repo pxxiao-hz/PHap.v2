@@ -826,11 +826,10 @@ def parse_arguments():
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
     parser.add_argument('--process', type=int, default=12, help='Maximum parallel processes [12]')
 
-    find_longest = parser.add_argument_group('>>> Parameters for find longest subsequences')
-    find_longest.add_argument('--min_align_length', type=int, default=200, help="Minimum alignment length [200]")
-    find_longest.add_argument("--min_unitig_length", type=int, default=1000, help="Minimum unitig length [1000]")
-    find_longest.add_argument('--min_alignment_distance', type=int, default=500000, help='The minimum distance between two alignments [500000]')
-    find_longest.add_argument(
+    alignment = parser.add_argument_group('>>> Alignment-chain filtering')
+    alignment.add_argument('--min_align_length', type=int, default=200, help="Minimum alignment length [200]")
+    alignment.add_argument("--min_unitig_length", type=int, default=1000, help="Minimum unitig length [1000]")
+    alignment.add_argument(
         '--min-locus-query-coverage',
         '--min_match_ratio',
         dest='min_locus_query_coverage',
@@ -838,9 +837,6 @@ def parse_arguments():
         default=0.05,
         help='Minimum interval-union query coverage for locus placement [0.05]',
     )
-    find_longest.add_argument('--min_lis_size', type=int, default=5, help='Minimum number of alignments in a LIS to be considered for mergeing [5]')
-    find_longest.add_argument('--min_lis_length', type=int, default=1000000, help='Minimum length of alignments in a LIS to be considered for mergeing [1000000]')
-    find_longest.add_argument('--max_lis_distance', type=int, default=3000000, help='Maximum distance between LIS to be considered for merge [3000000]')
 
     locus = parser.add_argument_group('>>> Strict mT2T locus evidence')
     locus.add_argument(
@@ -1005,13 +1001,12 @@ def main():
 
     paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.paf')
     sorted_paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.sort.paf')
-    locus_filtered_paf = os.path.join(step1_dir, 'p_utg_vs_mT2T.locus_filtered.paf')
+    best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.best.paf')
     paf_alignment_audit = os.path.join(step1_dir, 'paf_alignment_audit.tsv')
     locus_candidate_audit = os.path.join(step1_dir, 'unitig_locus_candidates.tsv')
     locus_decision_audit = os.path.join(step1_dir, 'locus_rescue_decisions.tsv')
     locus_routing_audit = os.path.join(step1_dir, 'unitig_routing.tsv')
     locus_manifest = os.path.join(step1_dir, 'locus_evidence_manifest.tsv')
-    best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.best.paf')
     allelic_table_file = os.path.join(step1_dir, 'allelic.ctg.table')
     allelic_table_sorted = os.path.join(step1_dir, 'allelic.ctg.table.sort')
     top_contigs_file = os.path.join(step1_dir, 'top_contigs_per_bin.txt')
@@ -1054,7 +1049,7 @@ def main():
             '--min-locus-score-margin', str(args.min_locus_score_margin),
             '--min-low-coverage-read-support',
             str(args.min_low_coverage_read_support),
-            '--filtered-paf', locus_filtered_paf,
+            '--filtered-paf', best_paf_file,
             '--alignment-audit', paf_alignment_audit,
             '--candidate-audit', locus_candidate_audit,
             '--decision-audit', locus_decision_audit,
@@ -1070,20 +1065,6 @@ def main():
                 ['--read-support', args.low_coverage_support_file]
             )
         run_command(locus_command)
-
-        # Find the longest subsequence
-        run_command([
-            sys.executable, '-m', 'utils.find_longest_subsequence',
-            '--paf', locus_filtered_paf,
-            '--min_alignment_distance', str(args.min_alignment_distance),
-            '--min_align_length', str(args.min_align_length),
-            '--min_unitig_length', str(args.min_unitig_length),
-            '--best_lis_output', best_paf_file,
-            '--min_match_ratio', str(args.min_locus_query_coverage),
-            '--min_lis_size', str(args.min_lis_size),
-            '--min_lis_length', str(args.min_lis_length),
-            '--max_lis_distance', str(args.max_lis_distance)
-        ])
 
         # Generate allelic table
         run_command([

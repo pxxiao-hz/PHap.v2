@@ -92,39 +92,6 @@ class LocusWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(completed.returncode, 0, completed.stderr)
 
-            best = root / "best.paf"
-            completed = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "utils.find_longest_subsequence",
-                    "--paf",
-                    str(filtered),
-                    "--min_align_length",
-                    "1",
-                    "--min_unitig_length",
-                    "1",
-                    "--min_alignment_distance",
-                    "1000",
-                    "--min_match_ratio",
-                    "0.5",
-                    "--min_lis_size",
-                    "1",
-                    "--min_lis_length",
-                    "1",
-                    "--max_lis_distance",
-                    "1000",
-                    "--best_lis_output",
-                    str(best),
-                ],
-                cwd=root,
-                env={**os.environ, "PYTHONPATH": str(ROOT)},
-                text=True,
-                capture_output=True,
-                check=False,
-            )
-            self.assertEqual(completed.returncode, 0, completed.stderr)
-
             top = root / "top.tsv"
             allelic = root / "allelic.tsv"
             completed = subprocess.run(
@@ -133,7 +100,7 @@ class LocusWorkflowTests(unittest.TestCase):
                     "-m",
                     "utils.allelic_table_generate",
                     "--paf_file",
-                    str(best),
+                    str(filtered),
                     "--min_align_length",
                     "1",
                     "--min_unitig_length",
@@ -188,6 +155,8 @@ class LocusWorkflowTests(unittest.TestCase):
                 sequence_directory / "locus_sequence_routing.tsv"
             ).read_text(encoding="utf-8")
             manifest_text = manifest.read_text(encoding="utf-8")
+            alignment_audit_text = alignment_audit.read_text(encoding="utf-8")
+            candidate_text = candidates.read_text(encoding="utf-8")
 
         self.assertIn("chr1\t0\t1000\tu1\t1000", top_text)
         self.assertIn("chr1\t0\t1000\tu2\t900", top_text)
@@ -197,6 +166,9 @@ class LocusWorkflowTests(unittest.TestCase):
         self.assertIn("u2\tchr1.putg.fa", sequence_routing)
         self.assertIn("primary_policy\ttp:A:P_or_I", manifest_text)
         self.assertIn("allowed_loci\tchr1", manifest_text)
+        self.assertIn("final_status\tfinal_reason", alignment_audit_text)
+        self.assertIn("\twritten\tselected_assigned_locus", alignment_audit_text)
+        self.assertIn("selected_for_output\tselection_reason", candidate_text)
 
 
 if __name__ == "__main__":

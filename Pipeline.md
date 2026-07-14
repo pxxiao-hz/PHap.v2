@@ -101,7 +101,9 @@ Locus placement is evaluated from the complete PAF before a best target is
 selected. Query coverage uses the union of 0-based half-open query intervals;
 chain identity, orientation, collinearity, and the best-versus-next-best score
 margin must all pass. mT2T evidence assigns only a locus, never a haplotype
-group. The stage writes `paf_alignment_audit.tsv`,
+group. The accepted, complete collinear chains are passed directly to the
+allelic-table stage; the former target-gap-only “LIS” pass and its
+`--min_lis_*` options have been removed. The stage writes `paf_alignment_audit.tsv`,
 `unitig_locus_candidates.tsv`, `locus_rescue_decisions.tsv`,
 `unitig_routing.tsv`, `locus_sequence_routing.tsv`, and a
 `locus_evidence_manifest.tsv` containing the exact thresholds and target set.

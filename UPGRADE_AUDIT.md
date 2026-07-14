@@ -175,6 +175,12 @@ runner 和 CLI smoke tests。
 
 ### P1-1 “LIS” 实现没有计算 query/target 共线性
 
+**状态：已在第五批本地修复。** 活动 cluster 路径现在直接使用严格 locus 阶段
+输出的完整 alignment chain。该阶段按 strand 检查 query 与 oriented-target
+坐标单调性，以 interval union 计算 query coverage，并在逐 alignment、逐 candidate
+和逐 unitig 审计中记录选择依据。旧的 target-gap-only “LIS” 脚本及不再生效的
+`--min_lis_*` 参数已删除。
+
 `utils/find_longest_subsequence.py:147-173` 只是按 target gap 切段，未检查 query
 坐标递增/递减、链方向或 overlap；这不是最长递增子序列。错误 alignment chain
 会进入 allelic table。
