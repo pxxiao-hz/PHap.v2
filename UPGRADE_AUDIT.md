@@ -119,6 +119,12 @@ group size 归一化，并明确使用 raw 还是 normalized score。
 
 ### P0-5 mT2T reverse join 坐标转换错误，单 alignment 还可能崩溃
 
+**状态：已在第六批本地修复。** reverse overlap 先保留原始区间，再按
+`[length-old_end, length-old_start)` 一次性转换；单 alignment 直接作为合法链处理，
+不再调用 `linregress()`。join 只接受两侧精确到端点的 overlap，避免把未比对 prefix
+混入 trim；正向、反向、反向 canonical traversal、单 alignment 和非零 overhang
+均有精确序列或保留断言。
+
 `scripts/util.py:798-801` 先覆盖 `tstarts`，再用已覆盖值计算 `tends`，反向坐标不是
 正确的 `[tlen-old_end, tlen-old_start)`。`calc_stats()` 在 LIS 只有一个点时调用
 `linregress()`，也没有边界处理。
@@ -127,6 +133,14 @@ group size 归一化，并明确使用 raw 还是 normalized score。
 contained 和冲突 overlap 建立精确序列断言。
 
 ### P0-6 mT2T 目前不是冲突感知的多 contig 组装
+
+**状态：已在第六批本地修复。** 新的 `phap_core/mt2t_overlap.py` 以 contig 物理端
+构建 bidirected oriented overlap graph。只有无歧义 simple path 会被物化；branch、
+cycle 和 orientation conflict 的整组 contig 原样保留，并写入 edge、join、routing、
+ID mapping 和 manifest 审计。每个 source contig 恰好一条 routing 记录。
+Containment 只有在 child interval-union coverage 为 100%、两端完整且 host 唯一时
+才删除；partial/competing child 均原样保留。identity、shorter/longer coverage 都是
+显式、方向无关的 CLI 参数。
 
 `scripts/util.py:871-884` 按 PAF 字典顺序尝试独立 pairwise merge。每条 contig
 只能碰巧加入第一个成功 pair，不能处理 A-B-C 链、分支、环、方向冲突或多个候选
@@ -138,7 +152,8 @@ overlap；结果还依赖遍历顺序。
 
 ### P0-7 PAF 覆盖率和 primary 标记解析不可靠
 
-**状态：活动 cluster locus 路径已在第四批本地修复；mT2T overlap backend 待迁移。**
+**状态：活动 cluster locus 路径已在第四批本地修复；mT2T overlap backend 已在
+第六批迁移。**
 
 多个模块把 alignment match length 直接累加，重叠 alignment 会重复计数，比例可
 被放大；多个位置使用 `parts[16][-1]` 判断 primary/supplementary，但 PAF optional
@@ -153,8 +168,14 @@ tag 没有固定列号。
 
 当前 cluster 流程从完整 PAF 生成 alignment、candidate、decision 和 routing
 审计；optional tag 顺序、缺失 `tp`、secondary、overlap union、正反向 chain、
-竞争 locus 和确定性输出均有回归测试。`scripts/util.py` 的 overlap/mT2T backend
-仍保留旧实现，必须在独立修复中迁移，不能据此宣称 mT2T join 已修复。
+竞争 locus 和确定性输出均有回归测试。mT2T overlap backend 现在复用同一 PAF
+parser 和 chain 规则；旧的 fixed-column、summed-coverage 和 pairwise-first-win
+实现已从 `scripts/util.py` 删除。
+
+mT2T 上游不再按文件存在性复用 split/Mash/minimap2 结果：每次在隔离 staging
+目录重建，使用安全数字文件名、参数列表 subprocess 和原子 `merge.paf`；0/1 个
+达到长度阈值的 contig 直接生成空 PAF 后进入完整 routing。upstream manifest 记录
+输入 hash、参数、工具版本、精确命令和 PAF hash。
 
 ### P0-8 流程存在明确的可执行性故障
 
@@ -237,8 +258,8 @@ reassignment 还固定 `run_in_parallel(..., 12)`。
 
 - `chr_uncluster_recluster.py` 与 `unchr_recluster.py` 约 500 行高度重复，应合并为一个
   library + 两个薄入口；目前两份实现已出现行为漂移。
-- `scripts/util.py` 同时保留 `remove_redundancy()` 和
-  `remove_redundancy_v2()`，并含大量失效注释、重复 import 和未使用变量。
+- `scripts/util.py` 的两套旧 mT2T redundancy/join 实现已删除；文件中其他历史 helper
+  仍需按调用关系继续拆分和清理。
 - FASTA、contig type、pickle、subprocess、并行 helper 被重复实现多次。
 - `unitig_overlap_ratio()` 为全部 unitig 两两建表，时间和内存均为 `O(U²)`；只需在
   同 bin 的 unitig 间建立 sparse pair。

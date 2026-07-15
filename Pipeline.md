@@ -46,10 +46,48 @@ evidence-supported numeric `--haploid-depth`.
 	2. Hi-C based scaffolding: Utilize Hi-C data to provide long-range interaction information for contig scaffolding.
 	3. Gap filling (optional): If substantial gaps remain, use long-read sequencing data (e.g., HiFi or ONT) to perform gap filling and further improve assembly continuity.
 ```shell
-phap mt2t --p_ctg hifiasm.asm.bp.p_ctg.gfa.fa --threads 2 --process 30 --match_ratio_query 0.2 --match_ratio_target 0.05 --r2_threshold 0.2
+phap mt2t \
+    --p_ctg hifiasm.asm.bp.p_ctg.gfa.fa \
+    --output-directory 01.mT2T \
+    --threads 2 \
+    --process 2 \
+    --cpu-budget 4 \
+    --min-identity 0.8 \
+    --match_ratio_query 0.2 \
+    --match_ratio_target 0.05
 
-# Main file: mT2T.fa
+# Main file: 01.mT2T/04.remove.redundancy/mT2T.fa
 ```
+
+The native overlap backend parses primary PAF tags by name, uses interval-union
+coverage, and accepts only validated, exact-end terminal alignment chains.
+`--match_ratio_query` and `--match_ratio_target` remain as compatibility aliases
+for direction-independent shorter- and longer-contig coverage thresholds. It constructs a
+bidirected overlap graph over physical contig ends. Unambiguous A–B–C paths are
+joined once; branches, cycles, and orientation conflicts are not guessed and
+their source contigs are preserved unchanged. Reverse joins use the exact
+forward-coordinate conversion `[length-old_end, length-old_start)` and support
+single-alignment chains without regression fitting.
+
+Contained contigs are removed only when the complete child sequence is covered
+by a unique internal host with the configured minimum identity. Partial or
+competing containment evidence is preserved and audited. Mash/minimap2 evidence
+is rebuilt in an isolated staging directory on every run; safe numeric filenames
+are mapped back to original FASTA IDs, so stale pair files and identifier-derived
+paths cannot enter a new result. Zero or one graph-eligible contig bypasses the
+external tools and is preserved directly.
+
+The graph stage atomically writes `mT2T.fa`, `retained.fa`, `removed.fa`,
+`mt2t_alignment_audit.tsv`, `mt2t_chain_audit.tsv`,
+`mt2t_overlap_edges.tsv`, `mt2t_containment_audit.tsv`,
+`mt2t_join_audit.tsv`, `mt2t_sequence_routing.tsv`, `mt2t_id_map.tsv`, and
+`mt2t_manifest.tsv`. The output root also contains `mt2t_split_id_map.tsv` and
+`mt2t_upstream_manifest.tsv`, including input/output hashes, exact external
+commands, parameters, and tool versions. Every input contig has exactly one routing row. Contigs
+below `--min_contig_length` are excluded from graph construction but retained
+in `mT2T.fa`; the former `--min_chr_length`, `--r2_threshold`, and `--lis_cov`
+options have been removed because they either caused silent loss or no longer
+described the implemented algorithm.
 
 ## 4. Hi-C reads mapping
 * Refer to the Hi-C processing method of [HapHiC](https://github.com/zengxiaofei/HapHiC?tab=readme-ov-file#:~:text=Quick%20start-,Align%20Hi%2DC%20data%20to%20the%20assembly,-First%2C%20you%20need): align Hi-C reads to the *p_utg* assembly to obtain the link information between unitigs.
@@ -70,7 +108,7 @@ python "$PHAP_REPO/shell/parse.hic.bam.py" --bam HiC.filtered.bam --fasta potato
 ```shell
 p_utg=potato4.hifi.ont.asm.bp.p_utg.gfa.fa
 threads=36
-mt2t=mT2T.fa
+mt2t=01.mT2T/04.remove.redundancy/mT2T.fa
 contig_type=contig_depth.txt
 full_links=full_links.pkl
 clm=paired_links.clm
