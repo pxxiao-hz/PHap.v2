@@ -18,7 +18,7 @@ class ReclusterWorkflowTests(unittest.TestCase):
     ) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             directory = Path(temporary_directory)
-            fasta = directory / "scaffold_A.putg.fa"
+            fasta = directory / "scaffold.putg.fa.copy.putg.fa"
             fasta.write_text(
                 ">anchor1\nGATC\n>anchor2\nGATC\n>candidate\nGATC\n",
                 encoding="utf-8",
@@ -87,7 +87,7 @@ class ReclusterWorkflowTests(unittest.TestCase):
             )
 
         self.assertIn(
-            "scaffold_A_group1\tanchor1\tcandidate",
+            "scaffold.putg.fa.copy_group1\tanchor1\tcandidate",
             cluster_text,
         )
         self.assertIn("candidate\tgroup1\t20.000000", audit_text)

@@ -175,6 +175,13 @@ rebuilt atomically from the current global corrected table on every run. Their
 prior existence is never treated as evidence that they match the current locus
 or dosage results.
 
+Steps 3--5 use `locus_sequence_manifest.tsv` as the sole current-locus source.
+The declared FASTA set, safe locus IDs, and record counts are validated before
+clustering. Historical directories under `04.recluster` are not discovered by
+a wildcard. Every expected current-locus result must exist, the rescue-stage
+merge is replaced atomically in stable locus-ID order, and
+`recluster_merge_sources.tsv` records the exact source file, size, and SHA-256.
+
 Low-coverage records are not assumed to be haplotigs. An optional
 `--low-coverage-support-file` must contain prevalidated
 `unitig_ID read_support` rows; only a unique locus plus the configured

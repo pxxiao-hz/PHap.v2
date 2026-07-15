@@ -69,6 +69,51 @@ def read_fasta(path: Union[str, Path]) -> Tuple[FastaRecord, ...]:
     return tuple(records)
 
 
+def count_fasta_records(path: Union[str, Path]) -> int:
+    """Validate a FASTA and count records without materializing sequences."""
+
+    source = str(path)
+    identifiers: set[str] = set()
+    current_id: Optional[str] = None
+    current_has_sequence = False
+    count = 0
+    with Path(path).open(encoding="utf-8") as handle:
+        for line_number, line in enumerate(handle, start=1):
+            text = line.rstrip("\r\n")
+            if not text:
+                continue
+            if text.startswith(">"):
+                if current_id is not None and not current_has_sequence:
+                    raise ValueError(
+                        f"{source}:{line_number - 1}: FASTA record "
+                        f"{current_id!r} has no sequence"
+                    )
+                header = text[1:]
+                identifier = header.split(maxsplit=1)[0] if header else ""
+                if not identifier:
+                    raise ValueError(f"{source}:{line_number}: empty FASTA identifier")
+                if identifier in identifiers:
+                    raise ValueError(
+                        f"{source}:{line_number}: duplicate FASTA identifier "
+                        f"{identifier!r}"
+                    )
+                identifiers.add(identifier)
+                current_id = identifier
+                current_has_sequence = False
+                count += 1
+            elif current_id is None:
+                raise ValueError(
+                    f"{source}:{line_number}: sequence appears before a FASTA header"
+                )
+            elif text.strip():
+                current_has_sequence = True
+    if current_id is None:
+        raise ValueError(f"{source}: FASTA contains no records")
+    if not current_has_sequence:
+        raise ValueError(f"{source}: FASTA record {current_id!r} has no sequence")
+    return count
+
+
 def fasta_lines(records: Iterable[FastaRecord]) -> Tuple[str, ...]:
     """Return deterministic two-line FASTA output preserving source headers."""
 

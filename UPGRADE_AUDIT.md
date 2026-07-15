@@ -260,7 +260,10 @@ cache key 包含两个 FASTA 的路径/字节大小/SHA-256、完整命令参数
 
 每染色体 `corrected_allelic_table` 不再缓存：它每次都从本轮 global
 table 精确匹配 chromosome 字段并原子覆盖，包括覆盖为空文件。
-其他旧 workflow 的 stage-level manifest 仍需在后续按活动调用路径逐项迁移。
+step 5 的 recluster merge 也只接受本轮 locus 列表显式对应的输出；历史
+染色体目录不再通过 glob 混入 rescue，合并来源、大小和 SHA-256 会写入
+审计表。其他旧 workflow 的 stage-level manifest 仍需在后续按活动调用
+路径逐项迁移。
 
 多个 stage 只判断固定文件是否存在；read phasing 还使用固定 pickle 名。更换输入、
 参数或代码后，旧结果仍会被加载。

@@ -53,7 +53,6 @@ To do:
 
 
 import argparse
-import glob
 import os
 import pickle
 import shlex
@@ -65,7 +64,9 @@ from pathlib import Path
 from phap_core.atomic_io import atomic_text_writer
 from phap_core.cluster_tables import write_chromosome_allelic_table
 from phap_core.clustering import AllelicBin, cluster_allelic_bins
+from phap_core.locus_sequence_manifest import read_current_locus_outputs
 from phap_core.read_assignment import parse_unitig_dosages
+from phap_core.recluster_merge import merge_current_recluster_outputs
 from phap_core.runner import (
     PreflightError,
     require_input_files,
@@ -91,7 +92,8 @@ def parse_fasta(fasta, flank, RE='GATC'):
     fa_dict = {}
     with open(fasta) as f:
         for line in f:
-            if not line.strip(): continue
+            if not line.strip():
+                continue
             if line.startswith('>'):
                 ctg = line.split()[0][1:]
                 fa_dict[ctg] = []
@@ -206,7 +208,6 @@ def unitig_overlap_ratio(file_allelic_table):
         with open(file_path, 'r') as file:
             for line in file:
                 columns = line.strip().split()
-                chrom = columns[0]
                 start = int(columns[1])
                 end = int(columns[2])
                 unitigs = columns[3:]
@@ -487,7 +488,8 @@ def genotype_allelic_table(file_allelic_table, dic_contig_type, dic_contig_hic, 
 
             ## 将每个 unitig 分配给已有的 group
             for unitig in unitigs:
-                if unitig in processed_unitigs: continue
+                if unitig in processed_unitigs:
+                    continue
 
                 for group in groups:
                     # if unitig in group and groups.index(group) not in processed_groups:
@@ -1156,14 +1158,17 @@ def main():
     ### step3: Cluster based on hi-c links
     step3_dir = os.path.join(cwd, '02.cluster', '03.cluster')
     os.makedirs(step3_dir, exist_ok=True)
-    # 待聚类的染色体文件列表
-    file_list = sorted(glob.glob(os.path.join(step2_dir, '*putg.fa')))
-    print(f'Debugs: file_list {file_list}')
+    try:
+        locus_outputs = read_current_locus_outputs(step2_dir)
+    except (OSError, ValueError) as error:
+        print(f"An error occurred: {error}", file=sys.stderr)
+        sys.exit(1)
+    print(f'[info] current loci for clustering: {len(locus_outputs)}')
     corrected_table = os.path.join(step1_dir, 'corrected_allelic_table.txt')
 
-    for file in file_list:
-        file_bn = os.path.basename(file)
-        chr = file_bn.replace('.putg.fa', '')
+    for locus_output in locus_outputs:
+        file = str(locus_output.path)
+        chr = locus_output.locus_id
         # 聚类
         cluster_chr_dir = os.path.join(step3_dir, chr)
         os.makedirs(cluster_chr_dir, exist_ok=True)
@@ -1193,9 +1198,9 @@ def main():
     commands = []
     step4_dir = os.path.join(cwd, '02.cluster', '04.recluster')
     os.makedirs(step4_dir, exist_ok=True)
-    for file in file_list:
-        file_bn = os.path.basename(file)
-        chr = file_bn.replace('.putg.fa', '')
+    for locus_output in locus_outputs:
+        file = str(locus_output.path)
+        chr = locus_output.locus_id
         recluster_chr_dir = os.path.join(step4_dir, chr)
         os.makedirs(recluster_chr_dir, exist_ok=True)
         command = [
@@ -1222,14 +1227,19 @@ def main():
     step5_dir = os.path.join(cwd, '02.cluster', '05.rescue')
     os.makedirs(step5_dir, exist_ok=True)
     # 生成总的 merge.group.reassignment.cluster.txt
-    recluster_cluster_file_list = sorted(
-        glob.glob(os.path.join(step4_dir, '*', 'group.reassignment.cluster.txt'))
-    )
     merged_cluster_file = os.path.join(step5_dir, 'merge.group.reassignment.cluster.txt')
-    with open(merged_cluster_file, 'w') as output:
-        for cluster_file in recluster_cluster_file_list:
-            with open(cluster_file) as source:
-                output.write(source.read())
+    merge_audit_file = os.path.join(step5_dir, 'recluster_merge_sources.tsv')
+    current_loci = tuple(output.locus_id for output in locus_outputs)
+    try:
+        merge_current_recluster_outputs(
+            step4_dir,
+            current_loci,
+            merged_cluster_file,
+            merge_audit_file,
+        )
+    except (OSError, ValueError) as error:
+        print(f"An error occurred: {error}", file=sys.stderr)
+        sys.exit(1)
     # 生成总的 un_chr.fa
     file_un_chr_fasta = os.path.join(step2_dir, 'un_chr.fa')
     # rescue

@@ -17,6 +17,7 @@ import pickle
 # from util import *
 from collections import defaultdict
 
+from phap_core.locus_sequence_manifest import locus_id_from_fasta_name
 from phap_core.read_assignment import parse_unitig_dosages
 from phap_core.reclustering import reassign_unitigs
 from utils.recluster_common import (
@@ -500,7 +501,7 @@ def main():
         args.fasta,
         args.RE,
     )
-    chromosome = os.path.basename(args.fasta).replace('.putg.fa', '')
+    chromosome = locus_id_from_fasta_name(os.path.basename(args.fasta))
     with open(args.contig_type) as source:
         dosages, source_states = parse_unitig_dosages(source)
     pair_links = load_pair_links(args.full_links)
