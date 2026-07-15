@@ -1,27 +1,15 @@
 #!/usr/bin/env python
-'''
-time: 2024-05-25
-author: pxxiao
-version: 1.0
-----
-description: 通过划分染色体窗口的形式，找到 allelic contig
-'''
+"""Generate an allelic-contig table from unitig-to-mT2T alignments."""
 
-import re
-from collections import defaultdict
-import os
 import argparse
-from statistics import median
+from collections import defaultdict
 
+from phap_core.allelic_bins import (
+    TargetIntervalEvidence,
+    build_allelic_bin_candidates,
+    select_legacy_top_n_candidates,
+)
 from phap_core.paf import parse_paf_line as parse_paf_record
-from phap_core.locus_rescue import interval_union_length
-
-'''
-alignment filter:
-    1. Skip supplementary alignments
-    2. 每一个 contig，只保留最长匹配的 reference
-    # 3. 过滤离群值
-'''
 
 
 ## 解析 contig type
@@ -112,179 +100,62 @@ def filter_longest_reference_per_contig(alignments):
         filtered_alignments.extend(
             aln for aln in alignments if aln['query_id'] == query_id and aln['target_id'] == best_ref
         )
-    # for i in filtered_alignments:
-    #     print(i)
     return filtered_alignments
 
 
-def mad(arr):
-    center = median(arr)
-    return median(abs(value - center) for value in arr)
-
-
-def filter_outliers(alignments):
-    if not alignments:
-        return alignments
-
-    target_starts = [aln['target_start'] for aln in alignments]
-    target_ends = [aln['target_end'] for aln in alignments]
-
-    start_median = median(target_starts)
-    start_mad = mad(target_starts)
-
-    end_median = median(target_ends)
-    end_mad = mad(target_ends)
-
-    # for aln in alignments:
-    #     if aln['query_id'] == 'utg000018l' and aln['target_id'] == 'scaffold_10':
-    #         print(start_median, start_mad, end_median, end_mad)
-
-    filtered_alignments = [aln for aln in alignments if abs(aln['target_start'] - start_median) <= 3 * start_mad and abs(aln['target_end'] - end_median) <= 3 * end_mad]
-
-    return filtered_alignments
-
-
-def split_alignment(aln, bin_size):
-    target_start = aln['target_start']
-    target_end = aln['target_end']
-    split_alignments = []
-
-    while target_start < target_end:
-        bin_start = (target_start // bin_size) * bin_size
-        bin_end = bin_start + bin_size
-        aln_copy = aln.copy()
-        aln_copy['target_start'] = max(target_start, bin_start)
-        aln_copy['target_end'] = min(target_end, bin_end)
-        aln_copy['match_len'] = aln_copy['target_end'] - aln_copy['target_start']
-        split_alignments.append(aln_copy)
-        target_start = bin_end
-
-    return split_alignments
-
-
-def assign_to_bins_and_filter(alignments, bin_size):
-    bins = defaultdict(list)
-    for aln in alignments:
-        split_aligns = split_alignment(aln, bin_size)
-        for split_aln in split_aligns:
-            bin_start = (split_aln['target_start'] // bin_size) * bin_size
-            bin_end = min(bin_start + bin_size, split_aln['target_len'])
-            bin_key = (split_aln['target_id'], bin_start, bin_end)
-            bins[bin_key].append(split_aln)
-
-    return bins
-
-
-def merge_contig_alignments1(bins, dic_contig_type):
-    merged_bins = defaultdict(lambda: defaultdict(int))
-    for bin_key, alignments in bins.items():
-        for aln in alignments:
-            query_id = aln['query_id']
-            match_len = aln['match_len']
-            unitig_type = dic_contig_type.get(query_id, 'haplotig')
-
-            # 根据 unitig 类型调整 match_len
-            if unitig_type == 'diplotig':
-                match_len *= 2
-            elif unitig_type == 'triplotig':
-                match_len *= 3
-            elif unitig_type == 'tetraplotig':
-                match_len *= 4
-
-            merged_bins[bin_key][aln['query_id']] += aln['match_len']
-    return merged_bins
-
-
-def get_top_n_contigs_per_bin1(merged_bins, dic_contig_type, top_n):
-    top_contigs_per_bin = {}
-    for bin_key, contigs in merged_bins.items():
-        sorted_contigs = sorted(contigs.items(), key=lambda x: x[1], reverse=True)
-
-        adjusted_top_n = top_n
-        selected_contigs = []
-
-        for query_id, match_len in sorted_contigs:
-            unitig_type = dic_contig_type.get(query_id, 'haplotig')
-
-            # 调整 top_n 根据 unitig 类型
-            if unitig_type == 'diplotig':
-                if adjusted_top_n > 0:
-                    selected_contigs.append((query_id, match_len))
-                    adjusted_top_n -= 2
-            elif unitig_type == 'triplotig':
-                if adjusted_top_n > 1:
-                    selected_contigs.append((query_id, match_len))
-                    adjusted_top_n -= 3
-            elif unitig_type == 'tetraplotig':
-                if adjusted_top_n > 2:
-                    selected_contigs.append((query_id, match_len))
-                    adjusted_top_n -= 4
-            else:  # 其他类型视为 haplotig
-                if adjusted_top_n > 0:
-                    selected_contigs.append((query_id, match_len))
-                    adjusted_top_n -= 1
-
-            if adjusted_top_n <= 0:
-                break
-
-        top_contigs_per_bin[bin_key] = selected_contigs
-    return top_contigs_per_bin
-
-
-def merge_contig_alignments(bins, dic_contig_type):
-    merged_intervals = defaultdict(lambda: defaultdict(list))
-    for bin_key, alignments in bins.items():
-        for aln in alignments:
-            merged_intervals[bin_key][aln['query_id']].append(
-                (aln['target_start'], aln['target_end'])
-            )
-    merged_bins = defaultdict(lambda: defaultdict(int))
-    for bin_key, unitig_intervals in merged_intervals.items():
-        for query_id, intervals in unitig_intervals.items():
-            merged_bins[bin_key][query_id] = interval_union_length(intervals)
-    return merged_bins
-
-
-def get_top_n_contigs_per_bin(merged_bins, dic_contig_type, top_n):
-    top_contigs_per_bin = {}
-    for bin_key, contigs in merged_bins.items():
-        sorted_contigs = sorted(
-            contigs.items(),
-            key=lambda item: (-item[1], item[0]),
+def build_candidates(alignments, bin_size):
+    evidence = (
+        TargetIntervalEvidence(
+            unitig_id=alignment['query_id'],
+            target_id=alignment['target_id'],
+            target_length=alignment['target_len'],
+            target_start=alignment['target_start'],
+            target_end=alignment['target_end'],
         )
-        top_contigs_per_bin[bin_key] = sorted_contigs[:top_n]
-    return top_contigs_per_bin
+        for alignment in alignments
+    )
+    return build_allelic_bin_candidates(evidence, bin_size=bin_size)
+
+
+def group_candidates(candidates):
+    grouped = defaultdict(list)
+    for candidate in candidates:
+        grouped[candidate.bin_key].append(candidate)
+    return grouped
 
 
 def write_top_contigs_per_bin(file_paf, min_align_length, min_unitig_length, bin_size, top_n, chr_num, output_file, out_allelic_table, file_contig_type):
 
-    dic_contig_type = parse_contig_type_based_on_dosage(file_contig_type)
+    parse_contig_type_based_on_dosage(file_contig_type)
 
     alignments, scffolds_chr = read_paf(file_paf, min_align_length, min_unitig_length, chr_num)
 
     filtered_alignments = filter_longest_reference_per_contig(alignments)
 
-    bins = assign_to_bins_and_filter(filtered_alignments, bin_size)
+    candidates = build_candidates(filtered_alignments, bin_size)
+    selected = select_legacy_top_n_candidates(candidates, top_n=top_n)
+    top_contigs_per_bin = group_candidates(selected)
 
-    merged_bins = merge_contig_alignments(bins, dic_contig_type)
-    top_contigs_per_bin = get_top_n_contigs_per_bin(merged_bins, dic_contig_type, top_n)
-
-    out_allelic = open(out_allelic_table, 'w')
-    with open(output_file, 'w') as out:
+    with open(output_file, 'w') as out, open(out_allelic_table, 'w') as out_allelic:
         out.write("#target_id\tbin_start\tbin_end\tquery_id\tmatch_len\n")
         for bin_key in sorted(top_contigs_per_bin):
             contigs = top_contigs_per_bin[bin_key]
-            target_id, bin_start, bin_end = bin_key
-            if target_id not in scffolds_chr: continue
+            target_id = bin_key.target_id
+            bin_start = bin_key.start
+            bin_end = bin_key.end
+            if target_id not in scffolds_chr:
+                continue
             unitig_ids = []
-            for query_id, match_len in contigs:
-                out.write(f"{target_id}\t{bin_start}\t{bin_end}\t{query_id}\t{match_len}\n")
-                unitig_ids.append(query_id)
+            for candidate in contigs:
+                out.write(
+                    f"{target_id}\t{bin_start}\t{bin_end}\t"
+                    f"{candidate.unitig_id}\t{candidate.union_support_bases}\n"
+                )
+                unitig_ids.append(candidate.unitig_id)
             out_allelic.write(
                 '\t'.join((target_id, str(bin_start), str(bin_end), *unitig_ids))
                 + '\n'
             )
-    out_allelic.close()
 
 
 def parse_arguments():
