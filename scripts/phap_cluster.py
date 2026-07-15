@@ -62,6 +62,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
+from phap_core.atomic_io import atomic_text_writer
+from phap_core.cluster_tables import write_chromosome_allelic_table
 from phap_core.clustering import AllelicBin, cluster_allelic_bins
 from phap_core.read_assignment import parse_unitig_dosages
 from phap_core.runner import (
@@ -69,6 +71,10 @@ from phap_core.runner import (
     require_input_files,
     require_tools,
     run_command,
+)
+from utils.cluster_alignment_workflow import (
+    build_or_reuse_locus_alignment,
+    minimap2_version as get_minimap2_version,
 )
 
 from .util import fasta_read, run_in_parallel
@@ -1020,6 +1026,9 @@ def main():
     os.makedirs(step1_dir, exist_ok=True)
 
     paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.paf')
+    paf_manifest = os.path.join(
+        step1_dir, 'p_utg_vs_mT2T.stage_manifest.json'
+    )
     sorted_paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.sort.paf')
     best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.best.paf')
     paf_alignment_audit = os.path.join(step1_dir, 'paf_alignment_audit.tsv')
@@ -1037,23 +1046,24 @@ def main():
 
     try:
         # Minimap2 alignment
-        if not os.path.exists(paf_file):
-            with open(paf_file, 'w') as output:
-                run_command(
-                    [
-                        'minimap2',
-                        '-cx',
-                        'asm5',
-                        '-t',
-                        str(args.threads),
-                        args.mT2T,
-                        args.p_utg,
-                    ],
-                    stdout=output,
-                )
+        minimap2_executable, minimap2_tool_version = get_minimap2_version()
+        alignment_cache = build_or_reuse_locus_alignment(
+            mt2t_fasta=args.mT2T,
+            unitig_fasta=args.p_utg,
+            output_paf=paf_file,
+            manifest_path=paf_manifest,
+            threads=args.threads,
+            minimap2_version=minimap2_tool_version,
+            minimap2_executable=minimap2_executable,
+        )
+        cache_state = 'hit' if alignment_cache.hit else 'rebuilt'
+        print(
+            f'[info] p_utg-vs-mT2T alignment cache: {cache_state} '
+            f'({alignment_cache.reason})'
+        )
 
         # Sort PAF file
-        with open(sorted_paf_file, 'w') as output:
+        with atomic_text_writer(sorted_paf_file) as output:
             run_command(
                 ['sort', '-k1,1', '-k6,6', '-k8,8n', paf_file],
                 stdout=output,
@@ -1107,7 +1117,7 @@ def main():
         ])
 
         # Sort allelic table
-        with open(allelic_table_sorted, 'w') as output:
+        with atomic_text_writer(allelic_table_sorted) as output:
             run_command(
                 ['sort', '-k1,1', '-k2,2n', allelic_table_file],
                 stdout=output,
@@ -1124,7 +1134,7 @@ def main():
             '--search_range', str(args.search_range)
         ])
 
-    except subprocess.CalledProcessError as e:
+    except (subprocess.CalledProcessError, ValueError) as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
 
@@ -1149,6 +1159,7 @@ def main():
     # 待聚类的染色体文件列表
     file_list = sorted(glob.glob(os.path.join(step2_dir, '*putg.fa')))
     print(f'Debugs: file_list {file_list}')
+    corrected_table = os.path.join(step1_dir, 'corrected_allelic_table.txt')
 
     for file in file_list:
         file_bn = os.path.basename(file)
@@ -1159,12 +1170,11 @@ def main():
         allelic_table_chr = os.path.join(
             cluster_chr_dir, f'{chr}.corrected_allelic_table.txt'
         )
-        if not os.path.exists(allelic_table_chr):
-            corrected_table = os.path.join(step1_dir, 'corrected_allelic_table.txt')
-            with open(corrected_table) as source, open(allelic_table_chr, 'w') as output:
-                for line in source:
-                    if line.split('\t', 1)[0] == chr:
-                        output.write(line)
+        write_chromosome_allelic_table(
+            corrected_table,
+            chr,
+            allelic_table_chr,
+        )
         cluster(
             file,
             args.full_links,

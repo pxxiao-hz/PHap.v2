@@ -85,8 +85,11 @@ def validate_stage_cache(
     if not manifest.is_file():
         return CacheValidation(False, "manifest_missing")
     try:
-        observed = json.loads(manifest.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError):
+        observed = json.loads(
+            manifest.read_text(encoding="utf-8"),
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return CacheValidation(False, "manifest_invalid")
     if not isinstance(observed, dict):
         return CacheValidation(False, "manifest_invalid")
@@ -242,4 +245,14 @@ def _canonical_json(value: object) -> str:
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     )
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON key: {key}")
+        result[key] = value
+    return result

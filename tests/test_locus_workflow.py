@@ -7,11 +7,113 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from utils.paf_locus_evidence import _invalidate_owned_manifest
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class LocusWorkflowTests(unittest.TestCase):
+    def test_unrecognized_locus_manifest_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            manifest = Path(temporary_directory) / "manifest.tsv"
+            manifest.write_text("user data\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "unrecognized locus manifest"):
+                _invalidate_owned_manifest(str(manifest))
+
+            self.assertEqual(manifest.read_text(encoding="utf-8"), "user data\n")
+
+    def test_failed_run_removes_stale_locus_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest = root / "manifest.tsv"
+            manifest.write_text(
+                "key\tvalue\n"
+                "phap_version\told\n"
+                "paf\told.paf\n"
+                "unitig_fasta\told.fa\n"
+                "contig_type\told.tsv\n",
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "utils.paf_locus_evidence",
+                    "--paf",
+                    str(root / "missing.paf"),
+                    "--unitig-fasta",
+                    str(root / "missing.fa"),
+                    "--contig-type",
+                    str(root / "missing.tsv"),
+                    "--target-count",
+                    "1",
+                    "--filtered-paf",
+                    str(root / "filtered.paf"),
+                    "--alignment-audit",
+                    str(root / "alignment.tsv"),
+                    "--candidate-audit",
+                    str(root / "candidates.tsv"),
+                    "--decision-audit",
+                    str(root / "decisions.tsv"),
+                    "--routing-audit",
+                    str(root / "routing.tsv"),
+                    "--manifest",
+                    str(manifest),
+                ],
+                cwd=root,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertFalse(manifest.exists())
+
+    def test_manifest_path_collision_never_deletes_the_paf(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            paf = root / "input.paf"
+            original = "u1\t4\t0\t4\t+\tchr1\t4\t0\t4\t4\t4\t60\ttp:A:P\n"
+            paf.write_text(original, encoding="utf-8")
+            completed = subprocess.run(
+                [
+                    sys.executable,
+                    "-m",
+                    "utils.paf_locus_evidence",
+                    "--paf",
+                    str(paf),
+                    "--unitig-fasta",
+                    str(root / "unitigs.fa"),
+                    "--contig-type",
+                    str(root / "dosage.tsv"),
+                    "--target-count",
+                    "1",
+                    "--filtered-paf",
+                    str(root / "filtered.paf"),
+                    "--alignment-audit",
+                    str(root / "alignment.tsv"),
+                    "--candidate-audit",
+                    str(root / "candidates.tsv"),
+                    "--decision-audit",
+                    str(root / "decisions.tsv"),
+                    "--routing-audit",
+                    str(root / "routing.tsv"),
+                    "--manifest",
+                    str(paf),
+                ],
+                cwd=root,
+                env={**os.environ, "PYTHONPATH": str(ROOT)},
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+            self.assertNotEqual(completed.returncode, 0)
+            self.assertEqual(paf.read_text(encoding="utf-8"), original)
+
     def test_complete_paf_to_locus_routing_and_union_bin_support(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

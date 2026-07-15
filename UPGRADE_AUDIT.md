@@ -251,6 +251,17 @@ type 未参与 active ranking；refresh 先按 contig 数量裁剪，再按 dosa
 
 ### P1-4 中间结果缓存可能静默复用错误输入
 
+**状态：活动 cluster 的两个 existence-only gate 已在第八批本地修复。**
+`p_utg_vs_mT2T.paf` 现在只在 stage manifest 完整验证通过时复用；
+cache key 包含两个 FASTA 的路径/字节大小/SHA-256、完整命令参数、PHap
+版本、minimap2 解析路径和版本。PAF 哈希、manifest schema 或任一签名
+不匹配都会重建。输出使用同目录临时文件原子替换，manifest 最后提交；
+运行中输入变化时拒绝写 completion marker，并发窗口通过 stage lock 串行。
+
+每染色体 `corrected_allelic_table` 不再缓存：它每次都从本轮 global
+table 精确匹配 chromosome 字段并原子覆盖，包括覆盖为空文件。
+其他旧 workflow 的 stage-level manifest 仍需在后续按活动调用路径逐项迁移。
+
 多个 stage 只判断固定文件是否存在；read phasing 还使用固定 pickle 名。更换输入、
 参数或代码后，旧结果仍会被加载。
 

@@ -137,6 +137,14 @@ the same raw count by the total restriction sites in each candidate group.
 Both values and rankings are written to the cluster/recluster score audit
 tables regardless of which mode drives assignment.
 
+The expensive p_utg-to-mT2T minimap2 alignment is resumable only through
+`p_utg_vs_mT2T.stage_manifest.json`. A cache hit requires matching SHA-256
+fingerprints for both FASTA inputs, the complete alignment parameters, PHap
+and minimap2 versions, the resolved executable path, and the final PAF hash.
+An orphan, missing, partial, or modified PAF is rebuilt. The PAF is replaced
+atomically and the manifest is written last; concurrent PHap windows serialize
+this stage and recheck the cache under the stage lock.
+
 Locus placement is evaluated from the complete PAF before a best target is
 selected. Query coverage uses the union of 0-based half-open query intervals;
 chain identity, orientation, collinearity, and the best-versus-next-best score
@@ -161,6 +169,11 @@ in target bases and `--min-bin-coverage` is a fraction of the current bin
 (including a shorter terminal bin). Their permissive defaults are explicit;
 production thresholds should be set from dataset evidence rather than hidden
 in the implementation.
+
+Chromosome-specific corrected allelic tables are inexpensive and are therefore
+rebuilt atomically from the current global corrected table on every run. Their
+prior existence is never treated as evidence that they match the current locus
+or dosage results.
 
 Low-coverage records are not assumed to be haplotigs. An optional
 `--low-coverage-support-file` must contain prevalidated

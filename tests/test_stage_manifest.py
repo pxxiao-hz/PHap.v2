@@ -137,9 +137,15 @@ class StageManifestTests(unittest.TestCase):
             missing = validate_stage_cache(snapshot, manifest, {"paf": output})
             manifest.write_text("not-json\n", encoding="utf-8")
             invalid = validate_stage_cache(snapshot, manifest, {"paf": output})
+            manifest.write_text(
+                '{"schema":"first","schema":"second"}\n',
+                encoding="utf-8",
+            )
+            duplicate = validate_stage_cache(snapshot, manifest, {"paf": output})
 
         self.assertEqual(missing.reason, "manifest_missing")
         self.assertEqual(invalid.reason, "manifest_invalid")
+        self.assertEqual(duplicate.reason, "manifest_invalid")
 
     def test_manifest_is_not_written_if_input_changes_during_stage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -41,12 +41,14 @@ after:
 
 
 import argparse
+from itertools import chain
 
 from phap_core.allelic_table import (
     AllelicTableRow,
     filter_allelic_rows,
     find_missing_bridge_unitigs,
 )
+from phap_core.atomic_io import atomic_write_lines
 from phap_core.read_assignment import parse_unitig_dosages
 
 
@@ -191,13 +193,13 @@ def write_corrected_table1(corrected_table, output_file):
 
 def write_corrected_table(corrected_table, output_file):
     ''' 将修正后的 table 写入文件 '''
-    with open(output_file, 'w') as f:
-        for row in corrected_table:
-            if row is None:
-                continue
-            chromosome, start, end, unitigs = row
-            line = f"{chromosome}\t{start}\t{end}\t" + "\t".join(unitigs) + "\n"
-            f.write(line)
+    lines = (
+        f"{chromosome}\t{start}\t{end}\t" + "\t".join(unitigs)
+        for row in corrected_table
+        if row is not None
+        for chromosome, start, end, unitigs in (row,)
+    )
+    atomic_write_lines(output_file, lines)
 
 
 def parse_arguments():
@@ -245,10 +247,13 @@ def main():
     )
     write_corrected_table(corrected_table, output_file)
     audit_file = f'{wd}/allelic_table_exclusions.tsv'
-    with open(audit_file, 'w') as output:
-        output.write('unitig_ID\tchromosome\tstart\tend\tsource_state\treason\n')
-        for row in sorted(audit_rows):
-            output.write('\t'.join(map(str, row)) + '\n')
+    atomic_write_lines(
+        audit_file,
+        chain(
+            ('unitig_ID\tchromosome\tstart\tend\tsource_state\treason',),
+            ('\t'.join(map(str, row)) for row in sorted(audit_rows)),
+        ),
+    )
 
 
 if __name__ == '__main__':

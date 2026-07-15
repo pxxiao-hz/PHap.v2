@@ -4,12 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
-from typing import Dict, Iterable, Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from phap_core import __version__
 from phap_core.alignment_chains import select_longest_targets
+from phap_core.atomic_io import atomic_write_lines
 from phap_core.fasta import read_fasta
 from phap_core.locus_evidence import LocusEvidenceResult, evaluate_locus_evidence
 from phap_core.locus_rescue import LocusRescueThresholds
@@ -69,11 +69,11 @@ def write_outputs(
     decision_audit: str,
     routing_audit: str,
 ) -> None:
-    _atomic_write_lines(
+    atomic_write_lines(
         filtered_paf,
         (record.to_line() for record in result.filtered_records),
     )
-    _atomic_write_lines(
+    atomic_write_lines(
         alignment_audit,
         [
             "source\tline\tunitig_ID\tlocus_ID\ttp\tstatus\treason\t"
@@ -142,7 +142,7 @@ def write_outputs(
                 )
             )
         )
-    _atomic_write_lines(candidate_audit, candidate_lines)
+    atomic_write_lines(candidate_audit, candidate_lines)
 
     decision_lines = [
         "unitig_ID\tsource_state\tstatus\tassigned_locus\tassigned_group\t"
@@ -192,8 +192,8 @@ def write_outputs(
                 )
             )
         )
-    _atomic_write_lines(decision_audit, decision_lines)
-    _atomic_write_lines(routing_audit, routing_lines)
+    atomic_write_lines(decision_audit, decision_lines)
+    atomic_write_lines(routing_audit, routing_lines)
 
 
 def parse_arguments() -> argparse.Namespace:
@@ -224,6 +224,8 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     args = parse_arguments()
+    _validate_distinct_paths(args)
+    _invalidate_owned_manifest(args.manifest)
     records = read_paf(args.paf)
     primary_records, _ = select_primary_records(records, require_tp=True)
     if args.target_list:
@@ -286,7 +288,7 @@ def main() -> None:
         decision_audit=args.decision_audit,
         routing_audit=args.routing_audit,
     )
-    _atomic_write_lines(
+    atomic_write_lines(
         args.manifest,
         (
             "key\tvalue",
@@ -319,14 +321,56 @@ def _optional_float(value: Optional[float]) -> str:
     return "." if value is None else f"{value:.12g}"
 
 
-def _atomic_write_lines(path: str, lines: Iterable[str]) -> None:
-    target = Path(path)
-    temporary = target.with_name(f".{target.name}.tmp")
-    with temporary.open("w", encoding="utf-8", newline="\n") as output:
-        for line in lines:
-            output.write(line)
-            output.write("\n")
-    os.replace(temporary, target)
+def _validate_distinct_paths(args: argparse.Namespace) -> None:
+    paths = {
+        "paf": args.paf,
+        "unitig_fasta": args.unitig_fasta,
+        "contig_type": args.contig_type,
+        "filtered_paf": args.filtered_paf,
+        "alignment_audit": args.alignment_audit,
+        "candidate_audit": args.candidate_audit,
+        "decision_audit": args.decision_audit,
+        "routing_audit": args.routing_audit,
+        "manifest": args.manifest,
+    }
+    if args.target_list:
+        paths["target_list"] = args.target_list
+    if args.read_support:
+        paths["read_support"] = args.read_support
+
+    by_path: Dict[Path, str] = {}
+    for role, raw_path in paths.items():
+        path = Path(raw_path).resolve()
+        previous_role = by_path.get(path)
+        if previous_role is not None:
+            raise ValueError(
+                f"input and output paths must be distinct: {previous_role} and "
+                f"{role} both resolve to {path}"
+            )
+        by_path[path] = role
+
+
+def _invalidate_owned_manifest(path: str) -> None:
+    manifest = Path(path)
+    if not manifest.exists():
+        return
+    if not manifest.is_file():
+        raise ValueError(f"locus manifest is not a regular file: {manifest}")
+    try:
+        rows = manifest.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"cannot validate existing locus manifest: {manifest}") from error
+    keys = {
+        row.split("\t", 1)[0]
+        for row in rows[1:]
+        if "\t" in row
+    }
+    required_keys = {"phap_version", "paf", "unitig_fasta", "contig_type"}
+    if not rows or rows[0] != "key\tvalue" or not required_keys.issubset(keys):
+        raise ValueError(
+            f"refusing to replace unrecognized locus manifest: {manifest}"
+        )
+    manifest.unlink()
 
 
 if __name__ == "__main__":
