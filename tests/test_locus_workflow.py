@@ -94,6 +94,8 @@ class LocusWorkflowTests(unittest.TestCase):
 
             top = root / "top.tsv"
             allelic = root / "allelic.tsv"
+            allelic_candidates = root / "allelic_candidates.tsv"
+            allelic_bins = root / "allelic_bins.tsv"
             completed = subprocess.run(
                 [
                     sys.executable,
@@ -117,6 +119,10 @@ class LocusWorkflowTests(unittest.TestCase):
                     str(top),
                     "--out_allelic_table",
                     str(allelic),
+                    "--selection-audit",
+                    str(allelic_candidates),
+                    "--bin-audit",
+                    str(allelic_bins),
                 ],
                 cwd=root,
                 env={**os.environ, "PYTHONPATH": str(ROOT)},
@@ -157,6 +163,8 @@ class LocusWorkflowTests(unittest.TestCase):
             manifest_text = manifest.read_text(encoding="utf-8")
             alignment_audit_text = alignment_audit.read_text(encoding="utf-8")
             candidate_text = candidates.read_text(encoding="utf-8")
+            allelic_candidate_text = allelic_candidates.read_text(encoding="utf-8")
+            allelic_bin_text = allelic_bins.read_text(encoding="utf-8")
 
         self.assertIn("chr1\t0\t1000\tu1\t1000", top_text)
         self.assertIn("chr1\t0\t1000\tu2\t900", top_text)
@@ -169,6 +177,8 @@ class LocusWorkflowTests(unittest.TestCase):
         self.assertIn("final_status\tfinal_reason", alignment_audit_text)
         self.assertIn("\twritten\tselected_assigned_locus", alignment_audit_text)
         self.assertIn("selected_for_output\tselection_reason", candidate_text)
+        self.assertIn("copy_weighted_support_bases", allelic_candidate_text)
+        self.assertIn("\tselected\tunique_optimum_fills_ploidy\t", allelic_bin_text)
 
 
 if __name__ == "__main__":

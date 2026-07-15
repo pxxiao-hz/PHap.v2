@@ -48,12 +48,21 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 - allelic-bin target support 改用 clipped target interval union；首个 group seed
   也不再允许完全无 Hi-C 的非全倍性 unitig 绕过证据检查。
 
-当前仍不能宣称任意倍性生产数据端到端已验证：尚未运行真实全流程 benchmark；
-严格 locus routing 已接入活动 cluster 路径，但旧 LIS 分段启发式仍需以真实数据
-验证，`scripts/util.py` 中 mT2T overlap backend 的独立 PAF/merge 逻辑也尚未迁移。
+后续本地 correctness 修复还已完成：
 
-下面的问题清单仍保留为基线审计记录。P0-1、P0-2 和 P0-4 的活动路径已在本地
-修复；其余科学正确性问题仍待处理。
+- 旧 target-gap-only LIS 已被严格、可审计的 alignment chain 替换；
+- mT2T reverse join 和 pairwise-first-win 已替换为冲突感知 oriented overlap graph；
+- allelic-bin 候选从 contig-count `top_n` 截断改为 dosage-capacity 优化，
+  目标为 `union_support_bases * dosage`；并列最优不按 ID 猜测，每个
+  candidate/bin 都有独立审计记录。
+
+当前仍不能宣称任意倍性生产数据端到端已验证：尚未运行真实全流程 benchmark；
+严格 locus chain、mT2T overlap graph 和 dosage-capacity allelic selection 仍需以
+相同生产输入比较 completeness、switch/misjoin、duplication、read/Hi-C support
+和资源使用。
+
+下面的问题清单仍保留为基线审计记录，实施状态以各条目内的
+`状态` 为准。
 
 ## 1. 当前基线
 
@@ -220,6 +229,18 @@ CLI 声称支持 ploidy/top_n，但 clustering、reclustering、rescue、输出�
 支持其他倍性。
 
 ### P1-3 allelic table 的 dosage 逻辑前后不一致
+
+**状态：活动 generate 路径已在第七批本地修复。** 完整 bin 候选集现在
+通过 0/1 dosage-capacity 动态规划选择，约束为 `sum(dosage) <= ploidy`，
+目标为 copy-weighted target interval-union support。缺失/非法 dosage 不参与优化；
+多个最优 subset 同分时整个 bin 进入 `ambiguous`，ID 仅用于稳定输出。
+每个 candidate 和 bin 都输出 status/reason、copy count、剩余容量和 objective。
+bin 内最小 union support bases/覆盖率也已暴露为 CLI 参数并写入审计；
+默认值是明示的宽松值，不在代码中暗藏数据集阈值。
+
+旧 refresh bridge 启发式仍保留；它没有 bin alignment support，因此如果补入后
+仍超容量，当前会保守地删除该 bin 并记录 `ambiguous_bin_exceeds_ploidy`，
+不按 FASTA 长度猜测科学选择。
 
 `utils/allelic_table_generate.py` 的 active path 只是选 top N contig，传入的 contig
 type 未参与 active ranking；refresh 先按 contig 数量裁剪，再按 dosage 和固定 4

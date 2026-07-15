@@ -881,6 +881,18 @@ def parse_arguments():
     allelic_table = parser.add_argument_group('>>> Allelic table generated')
     allelic_table.add_argument("--bin_size", type=int, default=100000, help="Bin size [100000]")
     allelic_table.add_argument(
+        '--min-bin-support-bases',
+        type=int,
+        default=1,
+        help='Minimum target interval-union support within one bin, in bases [1]',
+    )
+    allelic_table.add_argument(
+        '--min-bin-coverage',
+        type=float,
+        default=0.0,
+        help='Minimum target interval-union fraction within one bin [0.0]',
+    )
+    allelic_table.add_argument(
         '--chr_num',
         type=int,
         required=True,
@@ -940,6 +952,14 @@ def main():
         raise SystemExit('phap cluster: error: --ploidy must be at least 1')
     if args.chr_num < 1:
         raise SystemExit('phap cluster: error: --chr_num must be at least 1')
+    if args.bin_size < 1 or args.min_bin_support_bases < 1:
+        raise SystemExit(
+            'phap cluster: error: bin size and support bases must be positive'
+        )
+    if not 0 <= args.min_bin_coverage <= 1:
+        raise SystemExit(
+            'phap cluster: error: --min-bin-coverage must be in [0, 1]'
+        )
     if args.min_hic_score < 0 or args.min_hic_margin < 0:
         raise SystemExit('phap cluster: error: Hi-C thresholds must be non-negative')
     for name, value in (
@@ -1010,6 +1030,10 @@ def main():
     allelic_table_file = os.path.join(step1_dir, 'allelic.ctg.table')
     allelic_table_sorted = os.path.join(step1_dir, 'allelic.ctg.table.sort')
     top_contigs_file = os.path.join(step1_dir, 'top_contigs_per_bin.txt')
+    allelic_candidate_audit = os.path.join(
+        step1_dir, 'allelic_bin_candidates.tsv'
+    )
+    allelic_bin_audit = os.path.join(step1_dir, 'allelic_bin_decisions.tsv')
 
     try:
         # Minimap2 alignment
@@ -1071,11 +1095,15 @@ def main():
             sys.executable, '-m', 'utils.allelic_table_generate',
             '--paf_file', best_paf_file,
             '--bin_size', str(args.bin_size),
-            '--top_n', str(args.ploidy),
+            '--ploidy', str(args.ploidy),
+            '--min-bin-support-bases', str(args.min_bin_support_bases),
+            '--min-bin-coverage', str(args.min_bin_coverage),
             '--chr_num', str(args.chr_num),
             '--contig_type', args.contig_type,
             '--out_top_contigs_per_bin', top_contigs_file,
-            '--out_allelic_table', allelic_table_file
+            '--out_allelic_table', allelic_table_file,
+            '--selection-audit', allelic_candidate_audit,
+            '--bin-audit', allelic_bin_audit,
         ])
 
         # Sort allelic table
@@ -1092,7 +1120,7 @@ def main():
             '--allelic_table', allelic_table_sorted,
             '--fasta', args.p_utg,
             '--contig_type', args.contig_type,
-            '--top_n', str(args.ploidy),
+            '--ploidy', str(args.ploidy),
             '--search_range', str(args.search_range)
         ])
 

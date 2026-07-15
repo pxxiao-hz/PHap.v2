@@ -123,6 +123,8 @@ phap cluster \
         --min-locus-identity 0.8 \
         --min-locus-query-coverage 0.05 \
         --min-locus-score-margin 0.05 \
+        --min-bin-support-bases 1 \
+        --min-bin-coverage 0 \
         --full_links $full_links \
         --hic-score-mode re_density \
         --min-hic-score 0 \
@@ -145,6 +147,20 @@ allelic-table stage; the former target-gap-only “LIS” pass and its
 `unitig_locus_candidates.tsv`, `locus_rescue_decisions.tsv`,
 `unitig_routing.tsv`, `locus_sequence_routing.tsv`, and a
 `locus_evidence_manifest.tsv` containing the exact thresholds and target set.
+
+Allelic-bin construction uses clipped target interval-union support. Candidate
+selection is a dosage-capacity optimization with `sum(dosage) <= ploidy`; its
+integer objective is copy-weighted target support (`union_bases * dosage`). A
+unique optimum is written to the compatibility allelic table. Equal best
+subsets are reported as `ambiguous` and are not resolved by contig ID. Missing,
+invalid, or out-of-ploidy dosage calls remain unassigned. The step writes one
+row per candidate to `allelic_bin_candidates.tsv` and one decision per bin to
+`allelic_bin_decisions.tsv`, including selected copy count, remaining capacity,
+objective value, thresholds, and reason. `--min-bin-support-bases` is measured
+in target bases and `--min-bin-coverage` is a fraction of the current bin
+(including a shorter terminal bin). Their permissive defaults are explicit;
+production thresholds should be set from dataset evidence rather than hidden
+in the implementation.
 
 Low-coverage records are not assumed to be haplotigs. An optional
 `--low-coverage-support-file` must contain prevalidated
