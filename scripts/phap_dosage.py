@@ -153,7 +153,6 @@ def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     unitig_calls = summarize_unitigs(
         window_calls,
         model,
-        min_confidence=args.min_confidence,
     )
 
     output_dir: Path = args.output_dir
@@ -269,7 +268,8 @@ def _write_model(path: Path, model: DosageModel, args: argparse.Namespace) -> No
     payload["classification"] = {
         "low_depth_policy": "dosage_1",
         "min_confidence": args.min_confidence,
-        "unitig_summary_policy": "average_depth",
+        "unitig_confidence_policy": "none",
+        "unitig_summary_policy": "nearest_average_depth",
     }
     with _atomic_text_writer(path) as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)

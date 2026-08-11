@@ -306,14 +306,13 @@ def classify_windows(
 def summarize_unitigs(
     calls: Sequence[WindowDosageCall],
     model: DosageModel,
-    *,
-    min_confidence: float = 0.8,
 ) -> list[UnitigDosageCall]:
-    """Classify each unitig from its mean window depth using ``model``.
+    """Classify each unitig by the nearest copy state to its mean depth.
 
     Window-class composition remains visible through ``dominant_class``,
     ``dominant_fraction``, ``class_counts``, and ``mixed_dosage`` for audit
-    purposes.  Those fields do not affect the final unitig dosage call.
+    purposes.  Neither those fields nor window-call confidence affects the
+    final unitig dosage call.  Half-copy boundaries deterministically round up.
     """
 
     by_contig: dict[str, list[WindowDosageCall]] = {}
@@ -334,24 +333,19 @@ def summarize_unitigs(
         )
         mixed_dosage = len(confident_dosages) > 1
         average_depth = math.fsum(call.depth for call in contig_calls) / len(contig_calls)
-        average_call = classify_window(
-            WindowDepth(contig_id, 0, 0, average_depth),
-            model,
-            min_confidence=min_confidence,
-        )
+        average_ratio = average_depth / model.haploid_depth
 
-        if average_call.dosage is not None:
-            dosage = average_call.dosage
-            status = "assigned"
-            contig_type = legacy_contig_type(dosage)
-        elif average_call.classification == "high_copy":
+        if average_ratio > model.ploidy + 0.5:
             dosage = None
             status = "high_copy"
             contig_type = "high_copy"
         else:
-            dosage = None
-            status = "ambiguous"
-            contig_type = "ambiguous"
+            dosage = min(
+                model.ploidy,
+                max(1, int(math.floor(average_ratio + 0.5))),
+            )
+            status = "assigned"
+            contig_type = legacy_contig_type(dosage)
 
         summaries.append(
             UnitigDosageCall(

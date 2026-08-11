@@ -1,5 +1,7 @@
-case_id	depths	haploid_depth	min_confidence	class_counts	old_status	old_contig_type	old_dosage	average_depth	new_status	new_contig_type	new_dosage
-insufficient_dominant_fraction	20,20,20,30,30	20	0.8	ambiguous:2,dosage_1:3	ambiguous	ambiguous	.	24	assigned	haplotig	1
-average_overrides_dominant	20,20,20,60,60	20	0.8	dosage_1:3,dosage_3:2	ambiguous	ambiguous	.	36	assigned	diplotig	2
-subhaploid_depth	5	20	0.8	dosage_1:1	assigned	haplotig	1	5	assigned	haplotig	1
-balanced_alternatives	20,40	20	0.8	dosage_1:1,dosage_2:1	ambiguous	ambiguous	.	30	ambiguous	ambiguous	.
+case_id	depths	haploid_depth	relative_sigma	min_confidence	class_counts	old_status	old_contig_type	old_dosage	average_depth	new_status	new_contig_type	new_dosage
+confidence_gate_removed	52	20	0.35	0.8	ambiguous:1	ambiguous	ambiguous	.	52	assigned	triplotig	3
+half_copy_boundary	20,40	20	0.1	0.8	dosage_1:1,dosage_2:1	ambiguous	ambiguous	.	30	assigned	diplotig	2
+average_overrides_dominant	20,20,20,60,60	20	0.1	0.8	dosage_1:3,dosage_3:2	assigned	diplotig	2	36	assigned	diplotig	2
+insufficient_dominant_fraction	20,20,20,30,30	20	0.1	0.8	ambiguous:2,dosage_1:3	assigned	haplotig	1	24	assigned	haplotig	1
+subhaploid_depth	5	20	0.1	0.8	dosage_1:1	assigned	haplotig	1	5	assigned	haplotig	1
+high_copy_average	100.1	20	0.1	0.8	high_copy:1	high_copy	high_copy	.	100.1	high_copy	high_copy	.

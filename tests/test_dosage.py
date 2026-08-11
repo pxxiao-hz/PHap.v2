@@ -99,7 +99,7 @@ class DosageModelTests(unittest.TestCase):
             {"ambiguous": 2, "dosage_1": 3},
         )
 
-    def test_ambiguous_average_depth_remains_ambiguous(self) -> None:
+    def test_half_copy_average_depth_rounds_up_without_confidence_gate(self) -> None:
         model = fit_dosage_model(
             [20.0, 40.0],
             ploidy=4,
@@ -114,9 +114,10 @@ class DosageModelTests(unittest.TestCase):
             model,
         )
         summary = summarize_unitigs(calls, model)[0]
-        self.assertEqual(summary.status, "ambiguous")
-        self.assertEqual(summary.contig_type, "ambiguous")
-        self.assertIsNone(summary.dosage)
+        self.assertEqual(summary.average_depth, 30.0)
+        self.assertEqual(summary.status, "assigned")
+        self.assertEqual(summary.contig_type, "diplotig")
+        self.assertEqual(summary.dosage, 2)
         self.assertTrue(summary.mixed_dosage)
 
     def test_average_depth_can_override_dominant_window_class(self) -> None:
@@ -156,7 +157,7 @@ class DosageModelTests(unittest.TestCase):
                     depths,
                     ploidy=4,
                     haploid_depth=float(row["haploid_depth"]),
-                    relative_sigma=0.1,
+                    relative_sigma=float(row["relative_sigma"]),
                 )
                 calls = classify_windows(
                     [
@@ -164,12 +165,9 @@ class DosageModelTests(unittest.TestCase):
                         for index, depth in enumerate(depths)
                     ],
                     model,
-                )
-                summary = summarize_unitigs(
-                    calls,
-                    model,
                     min_confidence=float(row["min_confidence"]),
-                )[0]
+                )
+                summary = summarize_unitigs(calls, model)[0]
                 observed_counts = ",".join(
                     f"{name}:{count}"
                     for name, count in sorted(
@@ -277,8 +275,10 @@ class DosageCliTests(unittest.TestCase):
             ])
             self.assertEqual(dominant_fields[7], "false")
             balanced_fields = rows_by_id["utg_balanced"]
-            self.assertEqual(balanced_fields[2], "ambiguous")
-            self.assertEqual(balanced_fields[4], "ambiguous")
+            self.assertEqual(
+                balanced_fields[2:5],
+                ["diplotig", "2", "assigned"],
+            )
             low_fields = rows_by_id["utg_low"]
             self.assertEqual(low_fields[2:5], ["haplotig", "1", "assigned"])
 
@@ -297,7 +297,11 @@ class DosageCliTests(unittest.TestCase):
             )
             self.assertEqual(
                 model_payload["classification"]["unitig_summary_policy"],
-                "average_depth",
+                "nearest_average_depth",
+            )
+            self.assertEqual(
+                model_payload["classification"]["unitig_confidence_policy"],
+                "none",
             )
             self.assertNotIn(
                 "min_unitig_support",

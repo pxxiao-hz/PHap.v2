@@ -25,10 +25,13 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 
 当前 dosage 分类策略按后续测试反馈作了显式过渡调整：低于 `0.5 × haploid_depth`
 的 window 归入 `dosage_1`；unitig 的最终 dosage/type 仅使用全部 window 的
-`average_depth`，并由同一个 dosage model 和 `--min-confidence` 阈值分类。
-`dominant_class`、`dominant_fraction`、`class_counts` 和 `mixed_dosage` 只作为
-window 组成的审计字段，不影响最终判定。原 `--min-unitig-support` 已移除，避免
-暴露不再生效的比例参数。机器可读的合成 before/after 证据保存在
+`average_depth` 和同一个 dosage model。当前过渡策略取消 unitig 层的
+confidence gate：标准化平均深度直接归入
+最近整数 dosage，恰好半整数时向上取整；超过 `ploidy + 0.5` 的平均深度仍为
+`high_copy`。`--min-confidence` 只影响 window 审计分类。`dominant_class`、
+`dominant_fraction`、`class_counts` 和 `mixed_dosage` 只作为 window 组成的审计
+字段，不影响最终判定。原 `--min-unitig-support` 已移除，避免暴露不再生效的
+比例参数。机器可读的合成 before/after 证据保存在
 `tests/fixtures/dosage_policy_before_after.tsv`，验证命令为：
 
 ```shell
