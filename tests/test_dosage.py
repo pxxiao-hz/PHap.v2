@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import csv
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 from phap_core.dosage import (
@@ -21,6 +23,7 @@ from phap_core.dosage import (
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY_POINT = ROOT / "PHap.py"
 LEGACY_ENTRY_POINT = ROOT / "shell" / "dosage.analysis.contig.type.identified.py"
+POLICY_EVIDENCE = ROOT / "tests" / "fixtures" / "dosage_policy_before_after.tsv"
 
 
 class DosageModelTests(unittest.TestCase):
@@ -48,7 +51,9 @@ class DosageModelTests(unittest.TestCase):
         self.assertTrue(model.alternatives)
         self.assertEqual(model.alternatives[0].score, model.objective_score)
 
-    def test_window_states_include_low_ambiguous_and_high_copy(self) -> None:
+    def test_window_states_include_low_depth_dosage_one_ambiguous_and_high_copy(
+        self,
+    ) -> None:
         model = fit_dosage_model(
             [20.0, 40.0, 60.0, 80.0],
             ploidy=4,
@@ -58,12 +63,13 @@ class DosageModelTests(unittest.TestCase):
         low = classify_window(WindowDepth("low", 0, 10, 5.0), model)
         ambiguous = classify_window(WindowDepth("amb", 0, 10, 30.0), model)
         high = classify_window(WindowDepth("high", 0, 10, 100.1), model)
-        self.assertEqual(low.classification, "low_coverage")
+        self.assertEqual(low.classification, "dosage_1")
+        self.assertEqual(low.dosage, 1)
         self.assertEqual(ambiguous.classification, "ambiguous")
         self.assertEqual(high.classification, "high_copy")
         self.assertIsNone(ambiguous.dosage)
 
-    def test_mixed_windows_are_not_hidden_by_unitig_average(self) -> None:
+    def test_minor_alternative_dosage_does_not_override_dominant_class(self) -> None:
         model = fit_dosage_model(
             [20.0, 40.0],
             ploidy=4,
@@ -72,20 +78,82 @@ class DosageModelTests(unittest.TestCase):
         )
         calls = classify_windows(
             [
-                WindowDepth("mixed_utg", 10, 20, 40.0),
                 WindowDepth("mixed_utg", 0, 10, 20.0),
+                WindowDepth("mixed_utg", 10, 20, 20.0),
+                WindowDepth("mixed_utg", 20, 30, 20.0),
+                WindowDepth("mixed_utg", 30, 40, 20.0),
+                WindowDepth("mixed_utg", 40, 50, 40.0),
             ],
             model,
         )
         summary = summarize_unitigs(calls)[0]
-        self.assertAlmostEqual(summary.average_depth, 30.0)
-        self.assertEqual(summary.status, "mixed")
-        self.assertEqual(summary.contig_type, "ambiguous")
+        self.assertAlmostEqual(summary.average_depth, 24.0)
+        self.assertEqual(summary.status, "assigned")
+        self.assertEqual(summary.contig_type, "haplotig")
+        self.assertEqual(summary.dosage, 1)
+        self.assertEqual(summary.dominant_class, "dosage_1")
+        self.assertEqual(summary.dominant_fraction, 0.8)
         self.assertTrue(summary.mixed_dosage)
         self.assertEqual(
             dict(summary.class_counts),
-            {"dosage_1": 1, "dosage_2": 1},
+            {"dosage_1": 4, "dosage_2": 1},
         )
+
+    def test_no_dominant_support_is_ambiguous_not_mixed(self) -> None:
+        model = fit_dosage_model(
+            [20.0, 40.0],
+            ploidy=4,
+            haploid_depth=20.0,
+            relative_sigma=0.1,
+        )
+        calls = classify_windows(
+            [
+                WindowDepth("balanced", 0, 10, 20.0),
+                WindowDepth("balanced", 10, 20, 40.0),
+            ],
+            model,
+        )
+        summary = summarize_unitigs(calls, min_support=0.5)[0]
+        self.assertEqual(summary.status, "ambiguous")
+        self.assertEqual(summary.contig_type, "ambiguous")
+        self.assertIsNone(summary.dosage)
+        self.assertTrue(summary.mixed_dosage)
+
+    def test_machine_readable_policy_evidence_matches_current_calls(self) -> None:
+        with POLICY_EVIDENCE.open(encoding="utf-8", newline="") as handle:
+            rows = tuple(csv.DictReader(handle, delimiter="\t"))
+        self.assertTrue(rows)
+        for row in rows:
+            with self.subTest(case_id=row["case_id"]):
+                depths = [float(value) for value in row["depths"].split(",")]
+                model = fit_dosage_model(
+                    depths,
+                    ploidy=4,
+                    haploid_depth=float(row["haploid_depth"]),
+                    relative_sigma=0.1,
+                )
+                calls = classify_windows(
+                    [
+                        WindowDepth(row["case_id"], index, index + 1, depth)
+                        for index, depth in enumerate(depths)
+                    ],
+                    model,
+                )
+                summary = summarize_unitigs(
+                    calls,
+                    min_support=float(row["min_support"]),
+                )[0]
+                observed_counts = ",".join(
+                    f"{name}:{count}"
+                    for name, count in sorted(
+                        Counter(call.classification for call in calls).items()
+                    )
+                )
+                self.assertEqual(observed_counts, row["new_class_counts"])
+                self.assertEqual(summary.status, row["new_status"])
+                self.assertEqual(summary.contig_type, row["new_contig_type"])
+                observed_dosage = "." if summary.dosage is None else str(summary.dosage)
+                self.assertEqual(observed_dosage, row["new_dosage"])
 
     def test_invalid_depth_is_rejected_with_line_number(self) -> None:
         with self.assertRaisesRegex(DosageError, "line 1"):
@@ -110,8 +178,15 @@ class DosageCliTests(unittest.TestCase):
             ("utg_tri", 10_000, 20_000, 60.0),
             ("utg_tetra", 0, 10_000, 80.0),
             ("utg_tetra", 10_000, 20_000, 80.0),
-            ("utg_mixed", 0, 10_000, 20.0),
-            ("utg_mixed", 10_000, 20_000, 40.0),
+            ("utg_dominant", 0, 10_000, 20.0),
+            ("utg_dominant", 10_000, 20_000, 20.0),
+            ("utg_dominant", 20_000, 30_000, 20.0),
+            ("utg_dominant", 30_000, 40_000, 20.0),
+            ("utg_dominant", 40_000, 50_000, 40.0),
+            ("utg_balanced", 0, 10_000, 20.0),
+            ("utg_balanced", 10_000, 20_000, 40.0),
+            ("utg_low", 0, 10_000, 5.0),
+            ("utg_low", 10_000, 20_000, 5.0),
         ]
         with input_path.open("w", encoding="utf-8", newline="\n") as handle:
             for contig, start, end, depth in rows:
@@ -157,14 +232,42 @@ class DosageCliTests(unittest.TestCase):
                 lines[0].split("\t")[:3],
                 ["contig_ID", "average_depth", "contig_type"],
             )
-            mixed_fields = next(
-                line.split("\t") for line in lines if line.startswith("utg_mixed\t")
+            rows_by_id = {
+                fields[0]: fields
+                for fields in (line.split("\t") for line in lines[1:])
+            }
+            dominant_fields = rows_by_id["utg_dominant"]
+            self.assertEqual(dominant_fields[2:7], [
+                "haplotig",
+                "1",
+                "assigned",
+                "dosage_1",
+                "0.800000",
+            ])
+            self.assertEqual(dominant_fields[7], "true")
+            balanced_fields = rows_by_id["utg_balanced"]
+            self.assertEqual(balanced_fields[2], "ambiguous")
+            self.assertEqual(balanced_fields[4], "ambiguous")
+            low_fields = rows_by_id["utg_low"]
+            self.assertEqual(low_fields[2:5], ["haplotig", "1", "assigned"])
+
+            low_window_fields = next(
+                line.split("\t")
+                for line in window_path.read_text(encoding="utf-8").splitlines()
+                if line.startswith("utg_low\t")
             )
-            self.assertEqual(mixed_fields[2], "ambiguous")
-            self.assertEqual(mixed_fields[4], "mixed")
+            self.assertEqual(low_window_fields[5:7], ["dosage_1", "1"])
             model_payload = json.loads(model_path.read_text(encoding="utf-8"))
             self.assertEqual(model_payload["ploidy"], 4)
             self.assertIn("haploid_depth", model_payload)
+            self.assertEqual(
+                model_payload["classification"]["low_depth_policy"],
+                "dosage_1",
+            )
+            self.assertEqual(
+                model_payload["classification"]["unitig_summary_policy"],
+                "dominant_class",
+            )
 
     def test_legacy_script_path_remains_usable(self) -> None:
         result = subprocess.run(

@@ -65,7 +65,10 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--min-unitig-support",
         type=float,
         default=0.8,
-        help="Minimum fraction of all windows supporting one unitig dosage (default: 0.8).",
+        help=(
+            "Minimum fraction of all windows supporting the dominant unitig "
+            "class (default: 0.8)."
+        ),
     )
     parser.add_argument(
         "--pandepth",
@@ -272,8 +275,10 @@ def _write_model(path: Path, model: DosageModel, args: argparse.Namespace) -> No
         "header": bool(args.header),
     }
     payload["classification"] = {
+        "low_depth_policy": "dosage_1",
         "min_confidence": args.min_confidence,
         "min_unitig_support": args.min_unitig_support,
+        "unitig_summary_policy": "dominant_class",
     }
     with _atomic_text_writer(path) as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)

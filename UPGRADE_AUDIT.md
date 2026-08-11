@@ -23,11 +23,23 @@ CLI smoke test；未使用生产数据，也未运行 hifiasm、HapHiC、minimap
 - 新增 `phap dosage`、window/model 审计、unitig candidate/read assignment/group
   summary 审计及相应回归测试。
 
+当前 dosage 分类策略按后续测试反馈作了显式过渡调整：低于 `0.5 × haploid_depth`
+的 window 归入 `dosage_1`；unitig 在唯一 dominant class 的 fraction 达到
+`--min-unitig-support` 时采用 `dominant_class`，少数其他可信 dosage 只保留在
+`class_counts` 和 `mixed_dosage` 审计字段中，不再强制最终状态为 `mixed`。
+没有足够 dominant support 的记录仍为 `ambiguous`。机器可读的合成
+before/after 证据保存在 `tests/fixtures/dosage_policy_before_after.tsv`，验证命令为：
+
+```shell
+python -m pytest -q tests/test_dosage.py
+```
+
 第三批本地 clustering correctness 修复已完成：
 
 - clustering/re-clustering 改用显式 `--ploidy` 和动态 group，dosage `d` 必须
   完整进入 `d` 个 group，否则不产生部分分配；
-- `low_coverage`、`ambiguous`、`high_copy` 和缺失 dosage 不再回退为 haplotig；
+- 显式 legacy/external `low_coverage`、`ambiguous`、`high_copy` 和缺失 dosage
+  不会在下游静默回退为 haplotig；
 - raw Hi-C count 与 group restriction-site density 同时计算和审计，
   `--hic-score-mode` 决定实际排序；
 - 无 Hi-C 或证据并列的 unitig 不再删除或猜测；有 mT2T chromosome/bin 的记录

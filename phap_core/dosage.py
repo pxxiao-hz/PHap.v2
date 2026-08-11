@@ -169,8 +169,8 @@ def fit_dosage_model(
     Automatic fitting minimizes a robust loss to the nearest expected copy
     state (``1 * haploid_depth`` through ``ploidy * haploid_depth``).  Candidate
     values are derived only from deterministic quantiles of the observed
-    positive depths.  Zero-depth windows do not inform the fit, but remain
-    available for classification as ``low_coverage``.
+    positive depths.  Zero-depth windows do not inform the fit, but are called
+    ``dosage_1`` by the current low-depth classification policy.
     """
 
     _validate_model_parameters(ploidy, haploid_depth, relative_sigma)
@@ -248,8 +248,8 @@ def classify_window(
             window.end,
             window.depth,
             ratio,
-            "low_coverage",
-            None,
+            dosage_class_name(1),
+            1,
             1.0,
         )
     if ratio > model.ploidy + 0.5:
@@ -308,11 +308,12 @@ def summarize_unitigs(
     *,
     min_support: float = 0.8,
 ) -> list[UnitigDosageCall]:
-    """Summarize windows without hiding conflicting confident dosage states.
+    """Assign the sufficiently supported dominant window class to each unitig.
 
-    Any unitig containing two or more confident copy states is marked
-    ``mixed`` regardless of their proportions.  A single copy state is only
-    assigned when its fraction of all windows reaches ``min_support``.
+    Minority dosage classes remain visible through ``class_counts`` and
+    ``mixed_dosage``, but do not force the final status to ``mixed``.  A
+    dominant class is used only when its fraction reaches ``min_support``;
+    otherwise the unitig remains explicitly ambiguous.
     """
 
     if not 0.0 < min_support <= 1.0:
@@ -329,28 +330,40 @@ def summarize_unitigs(
         dominant_class, dominant_count = sorted(
             counts.items(), key=lambda item: (-item[1], item[0])
         )[0]
+        dominant_fraction = dominant_count / len(contig_calls)
+        dominant_is_tied = sum(count == dominant_count for count in counts.values()) > 1
         confident_dosages = sorted(
             {call.dosage for call in contig_calls if call.dosage is not None}
         )
         mixed_dosage = len(confident_dosages) > 1
         average_depth = math.fsum(call.depth for call in contig_calls) / len(contig_calls)
 
-        if mixed_dosage:
+        if (
+            dominant_is_tied
+            or dominant_fraction < min_support
+            or dominant_class == "ambiguous"
+        ):
             dosage = None
-            status = "mixed"
+            status = "ambiguous"
             contig_type = "ambiguous"
-        elif len(confident_dosages) == 1:
-            only_dosage = confident_dosages[0]
-            dosage_count = sum(call.dosage == only_dosage for call in contig_calls)
-            if dosage_count / len(contig_calls) >= min_support:
-                dosage = only_dosage
-                status = "assigned"
-                contig_type = legacy_contig_type(only_dosage)
-            else:
-                dosage = None
-                status = "ambiguous"
-                contig_type = "ambiguous"
-        elif len(counts) == 1 and dominant_class in {"low_coverage", "high_copy"}:
+        elif dominant_class.startswith("dosage_"):
+            dominant_dosages = {
+                call.dosage
+                for call in contig_calls
+                if call.classification == dominant_class and call.dosage is not None
+            }
+            if len(dominant_dosages) != 1:
+                raise DosageError(
+                    f"dominant class {dominant_class!r} has inconsistent dosage values"
+                )
+            dosage = next(iter(dominant_dosages))
+            status = "assigned"
+            contig_type = legacy_contig_type(dosage)
+        elif dominant_class == "low_coverage":
+            dosage = 1
+            status = "assigned"
+            contig_type = legacy_contig_type(1)
+        elif dominant_class == "high_copy":
             dosage = None
             status = dominant_class
             contig_type = dominant_class
@@ -367,7 +380,7 @@ def summarize_unitigs(
                 dosage=dosage,
                 status=status,
                 dominant_class=dominant_class,
-                dominant_fraction=dominant_count / len(contig_calls),
+                dominant_fraction=dominant_fraction,
                 mixed_dosage=mixed_dosage,
                 window_count=len(contig_calls),
                 class_counts=class_counts,
