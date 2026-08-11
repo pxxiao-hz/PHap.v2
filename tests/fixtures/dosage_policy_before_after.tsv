@@ -1,4 +1,5 @@
-case_id	depths	haploid_depth	min_support	old_class_counts	old_status	old_contig_type	old_dosage	new_class_counts	new_status	new_contig_type	new_dosage
-minor_alternative	20,20,20,20,40	20	0.8	dosage_1:4,dosage_2:1	mixed	ambiguous	.	dosage_1:4,dosage_2:1	assigned	haplotig	1
-subhaploid_depth	5	20	0.8	low_coverage:1	low_coverage	low_coverage	.	dosage_1:1	assigned	haplotig	1
-balanced_alternatives	20,40	20	0.5	dosage_1:1,dosage_2:1	mixed	ambiguous	.	dosage_1:1,dosage_2:1	ambiguous	ambiguous	.
+case_id	depths	haploid_depth	min_confidence	class_counts	old_status	old_contig_type	old_dosage	average_depth	new_status	new_contig_type	new_dosage
+insufficient_dominant_fraction	20,20,20,30,30	20	0.8	ambiguous:2,dosage_1:3	ambiguous	ambiguous	.	24	assigned	haplotig	1
+average_overrides_dominant	20,20,20,60,60	20	0.8	dosage_1:3,dosage_3:2	ambiguous	ambiguous	.	36	assigned	diplotig	2
+subhaploid_depth	5	20	0.8	dosage_1:1	assigned	haplotig	1	5	assigned	haplotig	1
+balanced_alternatives	20,40	20	0.8	dosage_1:1,dosage_2:1	ambiguous	ambiguous	.	30	ambiguous	ambiguous	.

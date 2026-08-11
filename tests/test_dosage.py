@@ -69,7 +69,7 @@ class DosageModelTests(unittest.TestCase):
         self.assertEqual(high.classification, "high_copy")
         self.assertIsNone(ambiguous.dosage)
 
-    def test_minor_alternative_dosage_does_not_override_dominant_class(self) -> None:
+    def test_unitig_call_uses_average_depth_not_window_class_fraction(self) -> None:
         model = fit_dosage_model(
             [20.0, 40.0],
             ploidy=4,
@@ -81,25 +81,25 @@ class DosageModelTests(unittest.TestCase):
                 WindowDepth("mixed_utg", 0, 10, 20.0),
                 WindowDepth("mixed_utg", 10, 20, 20.0),
                 WindowDepth("mixed_utg", 20, 30, 20.0),
-                WindowDepth("mixed_utg", 30, 40, 20.0),
-                WindowDepth("mixed_utg", 40, 50, 40.0),
+                WindowDepth("mixed_utg", 30, 40, 30.0),
+                WindowDepth("mixed_utg", 40, 50, 30.0),
             ],
             model,
         )
-        summary = summarize_unitigs(calls)[0]
+        summary = summarize_unitigs(calls, model)[0]
         self.assertAlmostEqual(summary.average_depth, 24.0)
         self.assertEqual(summary.status, "assigned")
         self.assertEqual(summary.contig_type, "haplotig")
         self.assertEqual(summary.dosage, 1)
         self.assertEqual(summary.dominant_class, "dosage_1")
-        self.assertEqual(summary.dominant_fraction, 0.8)
-        self.assertTrue(summary.mixed_dosage)
+        self.assertEqual(summary.dominant_fraction, 0.6)
+        self.assertFalse(summary.mixed_dosage)
         self.assertEqual(
             dict(summary.class_counts),
-            {"dosage_1": 4, "dosage_2": 1},
+            {"ambiguous": 2, "dosage_1": 3},
         )
 
-    def test_no_dominant_support_is_ambiguous_not_mixed(self) -> None:
+    def test_ambiguous_average_depth_remains_ambiguous(self) -> None:
         model = fit_dosage_model(
             [20.0, 40.0],
             ploidy=4,
@@ -113,10 +113,36 @@ class DosageModelTests(unittest.TestCase):
             ],
             model,
         )
-        summary = summarize_unitigs(calls, min_support=0.5)[0]
+        summary = summarize_unitigs(calls, model)[0]
         self.assertEqual(summary.status, "ambiguous")
         self.assertEqual(summary.contig_type, "ambiguous")
         self.assertIsNone(summary.dosage)
+        self.assertTrue(summary.mixed_dosage)
+
+    def test_average_depth_can_override_dominant_window_class(self) -> None:
+        model = fit_dosage_model(
+            [20.0, 40.0],
+            ploidy=4,
+            haploid_depth=20.0,
+            relative_sigma=0.1,
+        )
+        calls = classify_windows(
+            [
+                WindowDepth("average_only", 0, 10, 20.0),
+                WindowDepth("average_only", 10, 20, 20.0),
+                WindowDepth("average_only", 20, 30, 20.0),
+                WindowDepth("average_only", 30, 40, 60.0),
+                WindowDepth("average_only", 40, 50, 60.0),
+            ],
+            model,
+        )
+        summary = summarize_unitigs(calls, model)[0]
+        self.assertAlmostEqual(summary.average_depth, 36.0)
+        self.assertEqual(summary.dominant_class, "dosage_1")
+        self.assertEqual(summary.dominant_fraction, 0.6)
+        self.assertEqual(summary.dosage, 2)
+        self.assertEqual(summary.contig_type, "diplotig")
+        self.assertEqual(summary.status, "assigned")
         self.assertTrue(summary.mixed_dosage)
 
     def test_machine_readable_policy_evidence_matches_current_calls(self) -> None:
@@ -141,7 +167,8 @@ class DosageModelTests(unittest.TestCase):
                 )
                 summary = summarize_unitigs(
                     calls,
-                    min_support=float(row["min_support"]),
+                    model,
+                    min_confidence=float(row["min_confidence"]),
                 )[0]
                 observed_counts = ",".join(
                     f"{name}:{count}"
@@ -149,7 +176,11 @@ class DosageModelTests(unittest.TestCase):
                         Counter(call.classification for call in calls).items()
                     )
                 )
-                self.assertEqual(observed_counts, row["new_class_counts"])
+                self.assertEqual(observed_counts, row["class_counts"])
+                self.assertAlmostEqual(
+                    summary.average_depth,
+                    float(row["average_depth"]),
+                )
                 self.assertEqual(summary.status, row["new_status"])
                 self.assertEqual(summary.contig_type, row["new_contig_type"])
                 observed_dosage = "." if summary.dosage is None else str(summary.dosage)
@@ -181,8 +212,8 @@ class DosageCliTests(unittest.TestCase):
             ("utg_dominant", 0, 10_000, 20.0),
             ("utg_dominant", 10_000, 20_000, 20.0),
             ("utg_dominant", 20_000, 30_000, 20.0),
-            ("utg_dominant", 30_000, 40_000, 20.0),
-            ("utg_dominant", 40_000, 50_000, 40.0),
+            ("utg_dominant", 30_000, 40_000, 30.0),
+            ("utg_dominant", 40_000, 50_000, 30.0),
             ("utg_balanced", 0, 10_000, 20.0),
             ("utg_balanced", 10_000, 20_000, 40.0),
             ("utg_low", 0, 10_000, 5.0),
@@ -242,9 +273,9 @@ class DosageCliTests(unittest.TestCase):
                 "1",
                 "assigned",
                 "dosage_1",
-                "0.800000",
+                "0.600000",
             ])
-            self.assertEqual(dominant_fields[7], "true")
+            self.assertEqual(dominant_fields[7], "false")
             balanced_fields = rows_by_id["utg_balanced"]
             self.assertEqual(balanced_fields[2], "ambiguous")
             self.assertEqual(balanced_fields[4], "ambiguous")
@@ -266,8 +297,32 @@ class DosageCliTests(unittest.TestCase):
             )
             self.assertEqual(
                 model_payload["classification"]["unitig_summary_policy"],
-                "dominant_class",
+                "average_depth",
             )
+            self.assertNotIn(
+                "min_unitig_support",
+                model_payload["classification"],
+            )
+
+    def test_removed_unitig_support_option_is_rejected(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(ENTRY_POINT),
+                "dosage",
+                "--input-file",
+                "unused.tsv",
+                "--ploidy",
+                "4",
+                "--min-unitig-support",
+                "0.5",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+        )
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("unrecognized arguments: --min-unitig-support", result.stderr)
 
     def test_legacy_script_path_remains_usable(self) -> None:
         result = subprocess.run(

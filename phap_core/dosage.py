@@ -305,19 +305,17 @@ def classify_windows(
 
 def summarize_unitigs(
     calls: Sequence[WindowDosageCall],
+    model: DosageModel,
     *,
-    min_support: float = 0.8,
+    min_confidence: float = 0.8,
 ) -> list[UnitigDosageCall]:
-    """Assign the sufficiently supported dominant window class to each unitig.
+    """Classify each unitig from its mean window depth using ``model``.
 
-    Minority dosage classes remain visible through ``class_counts`` and
-    ``mixed_dosage``, but do not force the final status to ``mixed``.  A
-    dominant class is used only when its fraction reaches ``min_support``;
-    otherwise the unitig remains explicitly ambiguous.
+    Window-class composition remains visible through ``dominant_class``,
+    ``dominant_fraction``, ``class_counts``, and ``mixed_dosage`` for audit
+    purposes.  Those fields do not affect the final unitig dosage call.
     """
 
-    if not 0.0 < min_support <= 1.0:
-        raise DosageError("min_support must be in (0, 1]")
     by_contig: dict[str, list[WindowDosageCall]] = {}
     for call in calls:
         by_contig.setdefault(call.contig_id, []).append(call)
@@ -331,42 +329,25 @@ def summarize_unitigs(
             counts.items(), key=lambda item: (-item[1], item[0])
         )[0]
         dominant_fraction = dominant_count / len(contig_calls)
-        dominant_is_tied = sum(count == dominant_count for count in counts.values()) > 1
         confident_dosages = sorted(
             {call.dosage for call in contig_calls if call.dosage is not None}
         )
         mixed_dosage = len(confident_dosages) > 1
         average_depth = math.fsum(call.depth for call in contig_calls) / len(contig_calls)
+        average_call = classify_window(
+            WindowDepth(contig_id, 0, 0, average_depth),
+            model,
+            min_confidence=min_confidence,
+        )
 
-        if (
-            dominant_is_tied
-            or dominant_fraction < min_support
-            or dominant_class == "ambiguous"
-        ):
-            dosage = None
-            status = "ambiguous"
-            contig_type = "ambiguous"
-        elif dominant_class.startswith("dosage_"):
-            dominant_dosages = {
-                call.dosage
-                for call in contig_calls
-                if call.classification == dominant_class and call.dosage is not None
-            }
-            if len(dominant_dosages) != 1:
-                raise DosageError(
-                    f"dominant class {dominant_class!r} has inconsistent dosage values"
-                )
-            dosage = next(iter(dominant_dosages))
+        if average_call.dosage is not None:
+            dosage = average_call.dosage
             status = "assigned"
             contig_type = legacy_contig_type(dosage)
-        elif dominant_class == "low_coverage":
-            dosage = 1
-            status = "assigned"
-            contig_type = legacy_contig_type(1)
-        elif dominant_class == "high_copy":
+        elif average_call.classification == "high_copy":
             dosage = None
-            status = dominant_class
-            contig_type = dominant_class
+            status = "high_copy"
+            contig_type = "high_copy"
         else:
             dosage = None
             status = "ambiguous"

@@ -62,15 +62,6 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         help="Minimum posterior probability for a window dosage call (default: 0.8).",
     )
     parser.add_argument(
-        "--min-unitig-support",
-        type=float,
-        default=0.8,
-        help=(
-            "Minimum fraction of all windows supporting the dominant unitig "
-            "class (default: 0.8)."
-        ),
-    )
-    parser.add_argument(
         "--pandepth",
         action="store_true",
         help="Use PanDepth defaults: contig/start/end columns 1/2/3 and depth column 8.",
@@ -161,7 +152,8 @@ def run(args: argparse.Namespace) -> tuple[Path, Path, Path]:
     )
     unitig_calls = summarize_unitigs(
         window_calls,
-        min_support=args.min_unitig_support,
+        model,
+        min_confidence=args.min_confidence,
     )
 
     output_dir: Path = args.output_dir
@@ -277,8 +269,7 @@ def _write_model(path: Path, model: DosageModel, args: argparse.Namespace) -> No
     payload["classification"] = {
         "low_depth_policy": "dosage_1",
         "min_confidence": args.min_confidence,
-        "min_unitig_support": args.min_unitig_support,
-        "unitig_summary_policy": "dominant_class",
+        "unitig_summary_policy": "average_depth",
     }
     with _atomic_text_writer(path) as handle:
         json.dump(payload, handle, ensure_ascii=True, indent=2, sort_keys=True)
