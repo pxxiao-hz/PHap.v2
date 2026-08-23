@@ -154,6 +154,124 @@ class ReclusterTests(unittest.TestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(events[0]["acceptance_basis"], "constraint_forced")
 
+    def test_local_allelic_block_cannot_move_protected_long_unitig(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            names = ["A", "B", "C", "D", "L", "S"]
+            fasta = work / "chr1.putg.fa"
+            fasta.write_text(
+                "".join(
+                    f">{name}\n" + "GATC" * (
+                        2500 if name == "L" else 1 if name in {"A", "S"} else 250
+                    ) + "\n"
+                    for name in names
+                )
+            )
+            types = work / "types.tsv"
+            types.write_text(
+                "contig_ID\taverage_depth\tcontig_type\n"
+                + "".join(f"{name}\t20\thaplotig\n" for name in names)
+            )
+            seeds = work / "groups.txt"
+            seeds.write_text(
+                "group1\t2\tA L\n"
+                "group2\t2\tB S\n"
+                "group3\t1\tC\n"
+                "group4\t1\tD\n"
+            )
+            evidence = work / "cluster_assignments.tsv"
+            evidence.write_text(
+                "unitig\tgroups\tassignment_basis\tadjusted_assigned_hic_links\t"
+                "assigned_hic_fraction\thic_density_margin\n"
+                "A\t1\thic_supported\t100\t1\t1\n"
+                "B\t2\thic_supported\t100\t1\t1\n"
+                "C\t3\thic_supported\t100\t1\t1\n"
+                "D\t4\thic_supported\t100\t1\t1\n"
+                "L\t1\tconstraint_supported_low_margin\t1\t0.1\t0\n"
+                "S\t2\tconstraint_supported_low_margin\t1\t0.1\t0\n"
+            )
+            table = work / "table.tsv"
+            table.write_text("chr1\t0\t100\tC\tD\tL\tS\n")
+            links = work / "links.pkl"
+            with links.open("wb") as handle:
+                pickle.dump(
+                    {("B", "L"): 100, ("C", "L"): 110, ("D", "L"): 115},
+                    handle,
+                )
+
+            def run(output, threshold):
+                subprocess.run(
+                    [
+                        sys.executable, str(RECLUSTER),
+                        "--fasta", str(fasta), "--contig-type", str(types),
+                        "--full-links", str(links), "--clusters-file", str(seeds),
+                        "--cluster-assignments", str(evidence),
+                        "--allelic-table", str(table), "--output-dir", str(output),
+                        "--min-group-margin", "0.2",
+                        "--max-allelic-block-movable-length", str(threshold),
+                    ],
+                    check=True, capture_output=True, text=True,
+                )
+                with (output / "recluster_assignments.tsv").open() as handle:
+                    return {
+                        row["unitig"]: row
+                        for row in csv.DictReader(handle, delimiter="\t")
+                    }
+
+            protected_output = work / "protected"
+            protected_rows = run(protected_output, 500)
+            self.assertEqual(protected_rows["L"]["groups"], "1")
+            self.assertEqual(protected_rows["S"]["groups"], "2")
+            with (protected_output / "allelic_block_protections.tsv").open() as handle:
+                protections = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual(len(protections), 1)
+            self.assertEqual(protections[0]["protected_unitigs"], "L")
+            summary = json.loads(
+                (protected_output / "recluster_summary.json").read_text()
+            )
+            self.assertEqual(
+                summary["allelic_block_protection"]["protected_unitigs"], 1
+            )
+
+            unprotected_output = work / "unprotected"
+            subprocess.run(
+                [
+                    sys.executable, str(RECLUSTER),
+                    "--fasta", str(fasta), "--contig-type", str(types),
+                    "--full-links", str(links), "--clusters-file", str(seeds),
+                    "--cluster-assignments", str(evidence),
+                    "--allelic-table", str(table),
+                    "--output-dir", str(unprotected_output),
+                    "--min-group-margin", "0.2",
+                    "--max-allelic-block-movable-length", "0",
+                    "--min-group-bp-ratio", "0",
+                ],
+                check=True, capture_output=True, text=True,
+            )
+            with (unprotected_output / "recluster_assignments.tsv").open() as handle:
+                unprotected_rows = {
+                    row["unitig"]: row
+                    for row in csv.DictReader(handle, delimiter="\t")
+                }
+            self.assertEqual(unprotected_rows["L"]["groups"], "2")
+            self.assertEqual(unprotected_rows["S"]["groups"], "1")
+
+            rejected = subprocess.run(
+                [
+                    sys.executable, str(RECLUSTER),
+                    "--fasta", str(fasta), "--contig-type", str(types),
+                    "--full-links", str(links), "--clusters-file", str(seeds),
+                    "--cluster-assignments", str(evidence),
+                    "--allelic-table", str(table),
+                    "--output-dir", str(work / "rejected"),
+                    "--min-group-margin", "0.2",
+                    "--max-allelic-block-movable-length", "0",
+                ],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn("validation failed", rejected.stderr)
+
     def test_raw_hic_mode_does_not_apply_dosage_correction(self):
         with tempfile.TemporaryDirectory() as temporary:
             output, _ = self.run_recluster(

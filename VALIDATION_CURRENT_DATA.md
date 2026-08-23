@@ -209,3 +209,23 @@ and their union is all 4,564 p_utg unitigs; every emitted sequence length
 matches the original assembly.
 
 The rescue run completed in 37.7 seconds with about 317 MB peak memory.
+
+## 2026-08-23 Allelic-Block Long-Unitig Safety Validation
+
+The current block-only source was rerun for all twelve chromosomes with the
+new generic safeguards: local allelic blocks cannot move unitigs at least 5 Mb
+long, and the smallest haplotype group must contain at least 25% of median
+group bp. Neither safeguard uses parental markers or chromosome-specific IDs.
+
+The previous chr11 block result had group sizes 0.139, 99.939, 51.003, and
+52.285 Mb. A local 10 kb allelic row had moved the complete 47.335 Mb
+`utg000006l` from g1 to g2. The protected rerun retains it in g1 and produces
+47.388, 52.690, 51.003, and 52.285 Mb. Its minimum/median group-bp ratio rises
+from 0.0027 to 0.9176; all other chromosomes range from 0.9243 to 0.9916.
+
+Only three chr11 assignments differ from the unprotected run. Assignments on
+the other eleven chromosomes are identical, including every accepted
+allelic-block adjustment on chr02, chr05, and chr08. All twelve recluster
+summaries and the final rescue summary report zero validation violations. The
+rescue stage still assigns 45 of 544 candidates. The validated output is
+`02.cluster.v2.best_dosage_block_longprotect_20260823`.

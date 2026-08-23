@@ -755,6 +755,20 @@ def parse_arguments():
         '--recluster_max_allelic_block_configurations', type=int, default=256
     )
     recluster.add_argument(
+        '--recluster_max_allelic_block_movable_length', type=int, default=5000000,
+        help=(
+            'Protect unitigs at least this long from local allelic-block moves; '
+            'zero disables the protection [5000000]'
+        )
+    )
+    recluster.add_argument(
+        '--recluster_min_group_bp_ratio', type=float, default=0.25,
+        help=(
+            'Reject catastrophic haplotype-group collapse below this fraction '
+            'of median group bp; zero disables [0.25]'
+        )
+    )
+    recluster.add_argument(
         '--recluster_min_assigned_fraction', type=float, default=0.0,
         help='Optional minimum fraction of group-linked Hi-C assigned to selected groups [0.0]'
     )
@@ -1044,6 +1058,10 @@ def main():
             '--max-allelic-block-configurations', str(
                 args.recluster_max_allelic_block_configurations
             ),
+            '--max-allelic-block-movable-length', str(
+                args.recluster_max_allelic_block_movable_length
+            ),
+            '--min-group-bp-ratio', str(args.recluster_min_group_bp_ratio),
             '--min-assigned-fraction', str(args.recluster_min_assigned_fraction),
             '--max-rounds', str(args.recluster_max_rounds),
             '--refinement-rounds', str(args.recluster_refinement_rounds),

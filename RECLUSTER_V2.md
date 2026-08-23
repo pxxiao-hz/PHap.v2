@@ -56,6 +56,8 @@ They are not silently deleted and are not guessed into a haplotype by default.
 | `--recluster_min_group_margin` | 0.10 | Minimum density boundary margin |
 | `--recluster_min_allelic_block_anchors` | 1 | Minimum anchored members for joint block resolution |
 | `--recluster_max_allelic_block_configurations` | 256 | Safety cap on exact block enumeration |
+| `--recluster_max_allelic_block_movable_length` | 5000000 | Prevent a chromosome-local allelic block from moving an entire unitig at least this long; `0` disables the protection |
+| `--recluster_min_group_bp_ratio` | 0.25 | Reject a chromosome if its smallest haplotype group is below this fraction of median group bp; `0` disables the safety check |
 | `--recluster_min_assigned_fraction` | 0.0 | Optional absolute selected-link fraction filter |
 | `--recluster_max_rounds` | 10 | Maximum high-confidence propagation rounds |
 | `--recluster_refinement_rounds` | 4 | Stability rounds after initial propagation; rounds 2 through 5 |
@@ -82,13 +84,15 @@ the selected normalization, which is recorded in `recluster_summary.json`.
 | `recluster_assignments.tsv` | Every input unitig, original seed groups, cluster basis, review outcome, dosage, decision evidence, and final evidence |
 | `recluster_refinement.tsv` | Every group change made in stability rounds, with old/new groups and Hi-C evidence |
 | `allelic_block_reassignments.tsv` | Every accepted joint block, anchors, alternatives, acceptance basis, and changed groups |
+| `allelic_block_protections.tsv` | Blocks where chromosome-scale unitigs were retained as anchors instead of being moved by local block evidence |
 | `recluster_summary.json` | Input/assigned/unassigned bp, rounds, reasons, groups, and validation |
 | `unassigned_unitigs.txt` / `.fa` | Deferred sequence retained with no guessed haplotype |
 | `recluster_validation.tsv` | Must contain only its header in an accepted run |
 
 ## Acceptance Checks
 
-- `validation.violations`, `dosage_errors`, `changed_fixed_seeds`, and
+- `validation.violations`, `dosage_errors`, `changed_fixed_seeds`,
+  `group_bp_imbalances`, and
   `partition_errors` must all be zero.
 - Every assigned row must have `group_count == dosage`.
 - Review all `low_group_margin` unitigs before using

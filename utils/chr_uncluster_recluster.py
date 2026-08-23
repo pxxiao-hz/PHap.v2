@@ -12,6 +12,7 @@ import os
 import pickle
 import re
 import shutil
+import statistics
 import tempfile
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -529,6 +530,7 @@ def joint_reassign_allelic_blocks(
     assignments = dict(assignments)
     locked = set()
     events = []
+    protection_events = []
     low_confidence_prefixes = (
         "reviewed_seed_retained_",
         "reviewed_seed_low_",
@@ -546,6 +548,10 @@ def joint_reassign_allelic_blocks(
         basis = decisions[unitig]["basis"]
         return basis.startswith(low_confidence_prefixes)
 
+    def is_long_unitig_protected(unitig):
+        threshold = args.max_allelic_block_movable_length
+        return threshold > 0 and records[unitig]["length"] >= threshold
+
     ordered_blocks = sorted(
         blocks,
         key=lambda block: (
@@ -559,11 +565,28 @@ def joint_reassign_allelic_blocks(
         units = tuple(block["unitigs"])
         if sum(dosage[unitig] for unitig in units) > args.ploidy:
             continue
-        movable = tuple(
+        movable_candidates = tuple(
             sorted(
                 (unitig for unitig in units if is_movable(unitig)),
                 key=lambda unitig: (-records[unitig]["length"], unitig),
             )
+        )
+        protected = tuple(
+            unitig for unitig in movable_candidates
+            if is_long_unitig_protected(unitig)
+        )
+        if protected:
+            protection_events.append(
+                {
+                    **block,
+                    "protected": protected,
+                    "lengths": tuple(records[unitig]["length"] for unitig in protected),
+                    "current_groups": tuple(assignments.get(unitig, ()) for unitig in protected),
+                    "reason": "max_allelic_block_movable_length",
+                }
+            )
+        movable = tuple(
+            unitig for unitig in movable_candidates if unitig not in protected
         )
         if not movable:
             continue
@@ -683,7 +706,7 @@ def joint_reassign_allelic_blocks(
                 "acceptance_basis": acceptance_basis,
             }
         )
-    return assignments, decisions, events
+    return assignments, decisions, events, protection_events
 
 
 def refine_assignments(
@@ -765,7 +788,10 @@ def refine_assignments(
     return assignments, decisions, change_counts, events, stable, oscillation
 
 
-def validate(records, fixed_seed_assignments, assignments, dosage, block_events=()):
+def validate(
+    records, fixed_seed_assignments, assignments, dosage, block_events=(),
+    ploidy=4, min_group_bp_ratio=0.0,
+):
     violations = []
     for unitig, groups in assignments.items():
         if unitig not in records:
@@ -791,6 +817,25 @@ def validate(records, fixed_seed_assignments, assignments, dosage, block_events=
                         ",".join(str(group + 1) for group in sorted(shared)),
                     )
                 )
+    group_bp = [
+        sum(
+            records[unitig]["length"]
+            for unitig, groups in assignments.items()
+            if group in groups
+        )
+        for group in range(ploidy)
+    ]
+    median_bp = statistics.median(group_bp) if group_bp else 0
+    if median_bp > 0 and min(group_bp) / median_bp < min_group_bp_ratio:
+        smallest = min(range(ploidy), key=lambda group: group_bp[group])
+        violations.append(
+            (
+                "group_bp_imbalance",
+                f"group{smallest + 1}",
+                f">={min_group_bp_ratio:.6f}*median_group_bp",
+                f"{group_bp[smallest]}/{median_bp:g}",
+            )
+        )
     return violations
 
 
@@ -804,7 +849,8 @@ def write_outputs(
     original_seed_assignments, fixed_seed_assignments, cluster_evidence,
     assignments, decisions, round_counts, refinement_change_counts,
     refinement_events, refinement_stable, refinement_oscillation, neighbors,
-    block_events, raw_link_records, relevant_pairs, violations, args,
+    block_events, block_protection_events, raw_link_records, relevant_pairs,
+    violations, args,
 ):
     temporary = Path(tempfile.mkdtemp(prefix=".recluster.", dir=output_directory))
     try:
@@ -1019,6 +1065,40 @@ def write_outputs(
                     }
                 )
 
+        with (temporary / "allelic_block_protections.tsv").open(
+            "w", newline=""
+        ) as handle:
+            fields = [
+                "block_id", "chromosome", "start", "end", "unitigs",
+                "protected_unitigs", "protected_lengths", "current_groups",
+                "reason",
+            ]
+            writer = csv.DictWriter(
+                handle, fieldnames=fields, delimiter="\t", lineterminator="\n"
+            )
+            writer.writeheader()
+            for event in block_protection_events:
+                writer.writerow(
+                    {
+                        "block_id": event["block_id"],
+                        "chromosome": event["chromosome"],
+                        "start": event["start"],
+                        "end": event["end"],
+                        "unitigs": ",".join(event["unitigs"]),
+                        "protected_unitigs": ",".join(event["protected"]),
+                        "protected_lengths": ",".join(
+                            str(length) for length in event["lengths"]
+                        ),
+                        "current_groups": ";".join(
+                            f'{unitig}:{",".join(str(group + 1) for group in groups)}'
+                            for unitig, groups in zip(
+                                event["protected"], event["current_groups"]
+                            )
+                        ),
+                        "reason": event["reason"],
+                    }
+                )
+
         unassigned = [unitig for unitig in order if unitig not in assignments]
         with (temporary / "unassigned_unitigs.txt").open("w") as handle:
             handle.writelines(unitig + "\n" for unitig in unassigned)
@@ -1077,6 +1157,10 @@ def write_outputs(
                 "min_group_margin": args.min_group_margin,
                 "min_allelic_block_anchors": args.min_allelic_block_anchors,
                 "max_allelic_block_configurations": args.max_allelic_block_configurations,
+                "max_allelic_block_movable_length": (
+                    args.max_allelic_block_movable_length
+                ),
+                "min_group_bp_ratio": args.min_group_bp_ratio,
                 "min_assigned_fraction": args.min_assigned_fraction,
                 "max_rounds": args.max_rounds,
                 "refinement_rounds": args.refinement_rounds,
@@ -1123,15 +1207,42 @@ def write_outputs(
                     sorted(Counter(event["acceptance_basis"] for event in block_events).items())
                 ),
             },
+            "allelic_block_protection": {
+                "event_blocks": len(block_protection_events),
+                "protected_unitigs": len(
+                    {
+                        unitig
+                        for event in block_protection_events
+                        for unitig in event["protected"]
+                    }
+                ),
+                "threshold_bp": args.max_allelic_block_movable_length,
+            },
             "assignment_basis_counts": dict(sorted(basis_counts.items())),
             "hic": {"raw_link_records": raw_link_records, "chromosome_relevant_pairs": relevant_pairs},
             "groups": groups_summary,
+            "group_balance": {
+                "median_bp": statistics.median(
+                    group["bp"] for group in groups_summary.values()
+                ),
+                "minimum_to_median_bp_ratio": (
+                    min(group["bp"] for group in groups_summary.values())
+                    / statistics.median(
+                        group["bp"] for group in groups_summary.values()
+                    )
+                    if any(group["bp"] for group in groups_summary.values()) else 0.0
+                ),
+                "minimum_allowed_ratio": args.min_group_bp_ratio,
+            },
             "validation": {
                 "violations": len(violations),
                 "dosage_errors": sum(item[0] == "dosage" for item in violations),
                 "changed_fixed_seeds": sum(item[0] == "seed_changed" for item in violations),
                 "allelic_block_conflicts": sum(
                     item[0] == "allelic_block_conflict" for item in violations
+                ),
+                "group_bp_imbalances": sum(
+                    item[0] == "group_bp_imbalance" for item in violations
                 ),
                 "partition_errors": len(set(records) - set(assignments) - set(unassigned)),
             },
@@ -1183,6 +1294,10 @@ def run(args):
         raise ValueError("--min-allelic-block-anchors must be positive")
     if args.max_allelic_block_configurations < 1:
         raise ValueError("--max-allelic-block-configurations must be positive")
+    if args.max_allelic_block_movable_length < 0:
+        raise ValueError("--max-allelic-block-movable-length must be non-negative")
+    if not 0 <= args.min_group_bp_ratio <= 1:
+        raise ValueError("--min-group-bp-ratio must be between zero and one")
 
     output_directory = args.output_dir.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
@@ -1240,12 +1355,13 @@ def run(args):
         parse_allelic_blocks(args.allelic_table, records, relaxed_pairs)
         if args.allelic_table else []
     )
-    assignments, decisions, block_events = joint_reassign_allelic_blocks(
+    assignments, decisions, block_events, block_protection_events = joint_reassign_allelic_blocks(
         records, assignments, decisions, fixed_seed_assignments, neighbors,
         dosage, blocks, args,
     )
     violations = validate(
-        records, fixed_seed_assignments, assignments, dosage, block_events
+        records, fixed_seed_assignments, assignments, dosage, block_events,
+        args.ploidy, args.min_group_bp_ratio,
     )
     if violations:
         raise RuntimeError(f"Internal recluster validation failed with {len(violations)} violations")
@@ -1254,7 +1370,7 @@ def run(args):
         seed_assignments, fixed_seed_assignments, cluster_evidence, assignments,
         decisions, round_counts, refinement_change_counts, refinement_events,
         refinement_stable, refinement_oscillation, neighbors, block_events,
-        raw_link_records,
+        block_protection_events, raw_link_records,
         relevant_pairs, violations, args,
     )
     print(
@@ -1297,6 +1413,20 @@ def parse_arguments():
     parser.add_argument("--min-group-margin", type=float, default=0.10)
     parser.add_argument("--min-allelic-block-anchors", type=int, default=1)
     parser.add_argument("--max-allelic-block-configurations", type=int, default=256)
+    parser.add_argument(
+        "--max-allelic-block-movable-length", type=int, default=5000000,
+        help=(
+            "Do not let a local allelic block move unitigs at least this long; "
+            "zero disables the protection [5000000]"
+        ),
+    )
+    parser.add_argument(
+        "--min-group-bp-ratio", type=float, default=0.25,
+        help=(
+            "Reject a chromosome when its smallest haplotype group has less "
+            "than this fraction of median group bp; zero disables [0.25]"
+        ),
+    )
     parser.add_argument("--min-assigned-fraction", type=float, default=0.0)
     parser.add_argument("--max-rounds", type=int, default=10)
     parser.add_argument(

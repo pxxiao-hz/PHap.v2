@@ -113,6 +113,8 @@
    - 有多个配置时，最佳配置必须同时达到 block margin 0.10 和最小 links 5，才以 `margin` 接受。
 7. 含有 `03.cluster` 已放松 pair 的 allelic row 直接跳过，避免在 04 中重新引入已经判弱的约束。
 8. 每个 accepted block 写入 `allelic_block_reassignments.tsv`；summary 记录接受依据和 changed unitig 数。
+9. 默认禁止局部 allelic block 整体移动长度不小于 5 Mb 的 unitig，避免短区间约束改写染色体级序列；事件写入 `allelic_block_protections.tsv`。该保护不限制常规 Hi-C seed review/refinement，且可用 `--recluster_max_allelic_block_movable_length 0` 关闭。
+10. 增加独立的染色体级安全网：最小 group bp 默认不得低于各 group 中位数的 25%；否则 04 直接报 `group_bp_imbalance`，不把明显塌缩的结果当作成功输出。可用 `--recluster_min_group_bp_ratio` 调整。
 
 当前 block exact-enumeration 默认至少需要 1 个 anchor，上限 256 个配置。详见 [RECLUSTER_V2.md](RECLUSTER_V2.md)。
 
