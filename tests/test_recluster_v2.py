@@ -10,7 +10,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RECLUSTER = ROOT / "utils" / "chr_uncluster_recluster.py"
-SPLITTER = ROOT / "utils" / "split_clm_by_groups_v2.py"
 
 
 class ReclusterTests(unittest.TestCase):
@@ -289,50 +288,6 @@ class ReclusterTests(unittest.TestCase):
             self.assertEqual(summary["refinement_round_change_counts"], [0])
             self.assertTrue(summary["refinement"]["stable"])
             self.assertEqual(summary["validation"]["violations"], 0)
-
-    def test_clm_is_split_by_common_group_in_one_pass(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            chromosome = work / "recluster" / "chr1"
-            chromosome.mkdir(parents=True)
-            (chromosome / "group.reassignment.cluster.txt").write_text(
-                "chr1_group1\tA X Y\n"
-                "chr1_group2\tB\n"
-                "chr1_group3\tC Y\n"
-                "chr1_group4\tD\n"
-            )
-            clm = work / "links.clm"
-            clm.write_text(
-                "A+ X-\t10\t1 2\n"
-                "Y+ C+\t8\t1 2\n"
-                "Y- A+\t7\t1 2\n"
-                "A+ B+\t5\t1 2\n"
-            )
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(SPLITTER),
-                    "--clm",
-                    str(clm),
-                    "--recluster-dir",
-                    str(work / "recluster"),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(
-                (chromosome / "split_clms" / "group1.clm").read_text().splitlines(),
-                ["A+ X-\t10\t1 2", "Y- A+\t7\t1 2"],
-            )
-            self.assertEqual(
-                (chromosome / "split_clms" / "group3.clm").read_text().splitlines(),
-                ["Y+ C+\t8\t1 2"],
-            )
-            summary = json.loads((work / "recluster" / "clm_split.summary.json").read_text())
-            self.assertEqual(summary["input_records"], 4)
-            self.assertEqual(summary["written_group_records"], 3)
-
 
 if __name__ == "__main__":
     unittest.main()

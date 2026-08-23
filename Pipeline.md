@@ -57,7 +57,6 @@ threads=36
 mt2t=mT2T.fa
 contig_type=contig_depth.txt
 full_links=full_links.pkl
-clm=paired_links.clm
 
 phap cluster \
         --p_utg $p_utg \
@@ -66,8 +65,7 @@ phap cluster \
         --contig_type $contig_type \
         --top_n 4 \
         --chr_num 12 \
-        --full_links $full_links \
-        --clm $clm > log_cluster_out 2> log_cluster_err &
+        --full_links $full_links > log_cluster_out 2> log_cluster_err &
 ```
 
 ## 6. Phase reads, de novo assembly and scaffolding

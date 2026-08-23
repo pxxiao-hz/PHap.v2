@@ -58,8 +58,6 @@ chromosome.
 | `rescue_summary.json` | Input partition, candidate decisions, group sizes, Hi-C counts, and validation totals |
 | `unassigned_unitigs.txt` / `.fa` | Step 04 deferrals plus rescue candidates that remain unassigned |
 | `rescue_validation.tsv` | Must contain only its header in an accepted run |
-| `split_clms/chr*_group*.clm` | Final CLM files generated from one scan of the source CLM |
-| `clm_split.summary.json` | Input/output CLM record counts for all final groups |
 
 The obsolete combined multi-group FASTA is not generated. It duplicated every
 collapsed sequence and substantially increased both peak memory and disk use.
@@ -81,8 +79,7 @@ python PHap.v2/utils/unchr_recluster.py \
   --ploidy 4
 ```
 
-The public `phap cluster` workflow runs the same command and then invokes the
-single-pass CLM splitter automatically.
+The public `phap cluster` workflow runs the same rescue command automatically.
 
 ## Acceptance Checks
 

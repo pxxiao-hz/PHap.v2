@@ -52,7 +52,6 @@
 | 03 cluster | `utils/cluster_allelic_unitigs_v2.py` | exact-dosage 约束求解及多层 Hi-C 优化 |
 | 04 recluster | `utils/chr_uncluster_recluster.py` | seed 复核、批量传播、同步 refinement、allelic block 联合分配 |
 | 05 rescue | `utils/unchr_recluster.py` | 仅救援染色体未定位 unitig，保持 04 不变 |
-| CLM | `utils/split_clm_by_groups_v2.py` | 单次扫描 CLM 并输出全部 chromosome-haplotype 文件 |
 | phase reads | `utils/phase_reads_assignment.py`、`utils/phase_reads_assemble_anchor.py` | read-centric 分配、collapsed 深度均衡、单次 FASTQ 分发、分阶段组装和挂载 |
 | 测试 | `tests/test_*.py` | 表构建、约束求解、raw/dosage、block、recluster/rescue、原子写出等回归测试 |
 
@@ -127,9 +126,10 @@
 
 05 不使用 chromosome-local allelic block，因为这些候选本来就没有可靠的本地染色体归属。详见 [RESCUE_V2.md](RESCUE_V2.md)。
 
-### 4.6 CLM 和工程可靠性
+### 4.6 工程可靠性
 
-- CLM 从“每条染色体重复扫描完整文件”改成一次扫描并同时写出所有组。
+- v2 不再接收或生成 CLM。03–05 的 Hi-C 分配只使用 `full_links.pkl`；后续
+  `phase_reads` 会把分组后的 Hi-C reads 重新比对到新组装，不消费历史拆分 CLM。
 - 03–05 的 summary 均记录输入、参数、计数和 validation。
 - 失败时保留旧正式输出，减少半成品覆盖。
 - `--stop_after table|chr_seq|cluster|recluster|rescue` 支持分阶段运行和复核。

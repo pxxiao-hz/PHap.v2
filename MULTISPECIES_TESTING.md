@@ -4,7 +4,7 @@
 
 Branch: `testing/v2-multispecies-20260823`
 
-This is a validation branch. The 51 synthetic and workflow regression tests
+This is a validation branch. The 50 synthetic and workflow regression tests
 pass, and chr01 HiFi assignment has been tested on real autotetraploid potato
 data. Complete real-data validation of HiFi/ONT/Hi-C extraction, haplotype
 reassembly, and scaffolding is still in progress.

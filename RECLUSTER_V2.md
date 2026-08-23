@@ -86,13 +86,6 @@ the selected normalization, which is recorded in `recluster_summary.json`.
 | `unassigned_unitigs.txt` / `.fa` | Deferred sequence retained with no guessed haplotype |
 | `recluster_validation.tsv` | Must contain only its header in an accepted run |
 
-## CLM Splitting
-
-After all chromosomes finish, `split_clm_by_groups_v2.py` scans the source CLM
-once and writes each pair to every common chromosome-haplotype group. The old
-workflow scanned the complete CLM once per chromosome. The global summary is
-`04.recluster/clm_split.summary.json`.
-
 ## Acceptance Checks
 
 - `validation.violations`, `dosage_errors`, `changed_fixed_seeds`, and

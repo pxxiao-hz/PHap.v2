@@ -742,7 +742,6 @@ def parse_arguments():
     cluster.add_argument('--cluster_protected_short_overlap', type=float, default=0.50)
 
     recluster = parser.add_argument_group('>>> Recluster based on Hi-C links')
-    recluster.add_argument('--clm', type=str, help='Path to clm, from parsed hi-c links bam')
     recluster.add_argument(
         '--recluster_min_adjusted_links', type=float, default=5.0,
         help='Minimum Hi-C support on the selected normalization scale [5.0]'
@@ -831,7 +830,7 @@ def main():
 
     cwd = os.getcwd()       # current working dir
     for path_argument in (
-        'p_utg', 'mT2T', 'contig_type', 'paf', 'gfa', 'full_links', 'clm'
+        'p_utg', 'mT2T', 'contig_type', 'paf', 'gfa', 'full_links'
     ):
         value = getattr(args, path_argument, None)
         if value:
@@ -843,9 +842,6 @@ def main():
     }
     if stage_order[stop_after] >= stage_order['cluster'] and not args.full_links:
         raise SystemExit('--full_links is required when running through cluster')
-    if stage_order[stop_after] >= stage_order['recluster'] and not args.clm:
-        raise SystemExit('--clm is required when running through recluster')
-
     ### Step 1: p_utg vs mT2T
     step1_dir = os.path.join(output_root, '01.putg_vs_mT2T')
     os.makedirs(step1_dir, exist_ok=True)
@@ -1077,15 +1073,6 @@ def main():
         for future in as_completed(futures):
             future.result()
 
-    with open(os.path.join(step4_dir, 'log_clm_split_out'), 'w') as stdout, \
-            open(os.path.join(step4_dir, 'log_clm_split_err'), 'w') as stderr:
-        subprocess.run([
-            sys.executable,
-            os.path.join(utils_realpath, 'split_clm_by_groups_v2.py'),
-            '--clm', args.clm,
-            '--recluster-dir', step4_dir,
-            '--ploidy', str(args.top_n),
-        ], stdout=stdout, stderr=stderr, check=True)
     os.chdir(cwd)
 
     if stop_after == 'recluster':
@@ -1123,16 +1110,6 @@ def main():
         os.path.join(step5_dir, 'log_rescue_err'),
     )
 
-    with open(os.path.join(step5_dir, 'log_clm_split_out'), 'w') as stdout, \
-            open(os.path.join(step5_dir, 'log_clm_split_err'), 'w') as stderr:
-        subprocess.run([
-            sys.executable,
-            os.path.join(utils_realpath, 'split_clm_by_groups_v2.py'),
-            '--clm', args.clm,
-            '--clusters-file', os.path.join(step5_dir, 'group.reassignment.cluster.txt'),
-            '--output-dir', step5_dir,
-            '--ploidy', str(args.top_n),
-        ], stdout=stdout, stderr=stderr, check=True)
     os.chdir(cwd)
 
 

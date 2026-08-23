@@ -34,8 +34,7 @@ See [CLUSTER_V2.md](CLUSTER_V2.md) for the rewritten `03.cluster` constraint
 solver, dosage handling, Hi-C refinement, and acceptance checks.
 
 See [RECLUSTER_V2.md](RECLUSTER_V2.md) for the rewritten `04.recluster`
-confidence rules, iterative propagation, deferred-sequence handling, and
-single-pass CLM splitting.
+confidence rules, iterative propagation, and deferred-sequence handling.
 
 See [RESCUE_V2.md](RESCUE_V2.md) for the rewritten `05.rescue` candidate
 scope, chromosome-and-group confidence rules, final partition validation, and

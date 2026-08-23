@@ -11,11 +11,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 CLUSTER_SCRIPT = ROOT / "utils" / "cluster_allelic_unitigs_v2.py"
+PUBLIC_SCRIPT = ROOT / "PHap.py"
 sys.path.insert(0, str(ROOT / "utils"))
 import cluster_allelic_unitigs_v2 as cluster_v2
 
 
 class ConstraintClusterTests(unittest.TestCase):
+    def test_public_cluster_help_has_no_clm_input(self):
+        result = subprocess.run(
+            [sys.executable, str(PUBLIC_SCRIPT), "cluster", "--help"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotIn("--clm", result.stdout)
+        self.assertIn("--full_links", result.stdout)
+
     def test_hic_link_normalization_can_use_dosage_or_raw_counts(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             link_file = Path(temporary_directory) / "links.pkl"

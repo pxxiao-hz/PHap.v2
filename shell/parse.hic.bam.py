@@ -8,13 +8,11 @@ description: 解析 Hi-C bam 文件，获得 unitig 之间的 Hi-C links
 
 '''
 import argparse
-import gc
 import pickle
 
 import pysam
 from math import ceil
 from collections import defaultdict
-from array import array
 
 
 def parse_args():
@@ -71,15 +69,6 @@ def is_flank(coord, length, flank):
         return False
 
 
-def update_clm_dict(clm_dict, ctg_name_pair, len_i, len_j, coord_i_0, coord_j_0):
-
-    clm_dict[ctg_name_pair].extend((
-        len_i - coord_i_0 + coord_j_0,
-        len_i - coord_i_0 + len_j - coord_j_0,
-        coord_i_0 + coord_j_0,
-        coord_i_0 + len_j - coord_j_0))
-
-
 def output_pickle(dict_, to):
 
     with open(to, 'wb') as fpkl:
@@ -90,23 +79,6 @@ def load_pickle_file(file_path):
     with open(file_path, 'rb') as file:
         data = pickle.load(file)
     return data
-
-
-def output_clm(clm_dict):
-
-    ori_tuple = (('+', '+'), ('+', '-'), ('-', '+'), ('-', '-'))
-
-    with open('paired_links.clm', 'w') as fout:
-        for ctg_name_pair, list_ in clm_dict.items():
-            # minLinks == 3, links = len(list_)/2
-            if len(list_) < 8:
-                continue
-            for n in range(4):
-                new_list = ['{0} {0}'.format(v) for v in sorted(list_[n::4])]
-                fout.write('{}{} {}{}\t{}\t{}\n'.format(
-                    ctg_name_pair[0], ori_tuple[n][0],
-                    ctg_name_pair[1], ori_tuple[n][1],
-                    len(new_list)*2, ' '.join(new_list)))
 
 
 def divide_into_bins(fa_dict, bin_size):
@@ -173,7 +145,6 @@ def parse_hic_data(fa_dict, args):
     full_link_dict = defaultdict(int)
     flank_link_dict = defaultdict(int)
     HT_link_dict = defaultdict(int)
-    clm_dict = defaultdict(lambda: array('i'))
 
     # 解析 bam 文件
     format_options = [b'filter=flag.read1']
@@ -196,12 +167,9 @@ def parse_hic_data(fa_dict, args):
 
         full_link_dict[ctg_name_pair] += 1
 
-        # 假设已定义辅助函数 update_clm_dict
-        update_clm_dict(clm_dict, ctg_name_pair, fa_dict[ctg_i][1], fa_dict[ctg_j][1], coord_i - 1, coord_j - 1)
-
         # HT link pickle file
         update_HT_link_dict(HT_link_dict, ctg_i, ctg_j, fa_dict[ctg_i][1], fa_dict[ctg_j][1], coord_i, coord_j)
-    return full_link_dict, flank_link_dict, clm_dict, HT_link_dict
+    return full_link_dict, flank_link_dict, HT_link_dict
 
 
 def calculate_density(full_link_dict, fa_dict):
@@ -236,14 +204,11 @@ def main():
     ### 解析 FASTA
     fa_dict = parse_fasta(args.fasta)
 
-    full_link_dict, flank_link_dict, clm_dict, HT_link_dict = parse_hic_data(fa_dict, args)
+    full_link_dict, flank_link_dict, HT_link_dict = parse_hic_data(fa_dict, args)
     #
     output_pickle(full_link_dict, 'full_links.pkl')
     output_pickle(flank_link_dict, 'flank_links.pkl')
     output_pickle(HT_link_dict, 'HT_links.pkl')
-
-    # clm
-    output_clm(clm_dict)
 
     # full links
     out = open('full.links.txt', 'w')

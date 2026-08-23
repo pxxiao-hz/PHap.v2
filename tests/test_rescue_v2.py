@@ -10,7 +10,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RESCUE = ROOT / "utils" / "unchr_recluster.py"
-SPLITTER = ROOT / "utils" / "split_clm_by_groups_v2.py"
 
 
 class RescueTests(unittest.TestCase):
@@ -192,41 +191,6 @@ class RescueTests(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("FASTA membership/order mismatch", result.stderr)
             self.assertEqual(sentinel.read_text(), "existing\n")
-
-    def test_final_cluster_file_clm_split(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            work = Path(temporary)
-            output, _ = self.run_rescue(work)
-            clm = work / "links.clm"
-            clm.write_text(
-                "A+ X-\t10\t1 2\n"
-                "F+ Y+\t8\t1 2\n"
-                "G- Y+\t7\t1 2\n"
-                "A+ E+\t5\t1 2\n"
-            )
-            subprocess.run(
-                [
-                    sys.executable, str(SPLITTER),
-                    "--clm", str(clm),
-                    "--clusters-file", str(output / "group.reassignment.cluster.txt"),
-                    "--output-dir", str(output),
-                ],
-                check=True,
-                capture_output=True,
-                text=True,
-            )
-            self.assertEqual(
-                (output / "split_clms" / "chr01_group1.clm").read_text().splitlines(),
-                ["A+ X-\t10\t1 2"],
-            )
-            self.assertEqual(
-                (output / "split_clms" / "chr02_group2.clm").read_text().splitlines(),
-                ["F+ Y+\t8\t1 2"],
-            )
-            summary = json.loads((output / "clm_split.summary.json").read_text())
-            self.assertEqual(summary["input_records"], 4)
-            self.assertEqual(summary["written_group_records"], 3)
-
 
 if __name__ == "__main__":
     unittest.main()

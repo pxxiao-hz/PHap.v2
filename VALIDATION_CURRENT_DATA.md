@@ -174,11 +174,6 @@ For chr11, the final groups contain 47.81, 52.64, 50.69, and 52.15 Mb.
 `utg000281l`, `utg000196l`, and `utg000005l` join g4, while `utg000075l`
 joins g3. All four decisions have strong normalized Hi-C margins.
 
-The 6.5 GB CLM contained 2,416,352 records. The new splitter scanned it once in
-11.6 seconds with about 40 MB peak memory and generated all 48 nonempty group
-CLM files. The old design would have scanned the complete CLM independently
-for every chromosome.
-
 ## Chromosome-Unassigned Unitig Rescue
 
 The rewritten `05.rescue` was run with minimum adjusted support 5, chromosome
@@ -213,6 +208,4 @@ dosage memberships and 2,057 unique unassigned IDs. The two sets are disjoint
 and their union is all 4,564 p_utg unitigs; every emitted sequence length
 matches the original assembly.
 
-The rescue run completed in 37.7 seconds with about 317 MB peak memory. The
-6.5 GB CLM was then scanned once in 13.6 seconds with about 44 MB peak memory,
-writing 235,948 final group-record memberships across 48 CLM files.
+The rescue run completed in 37.7 seconds with about 317 MB peak memory.
