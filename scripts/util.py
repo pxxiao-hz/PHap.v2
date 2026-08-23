@@ -23,9 +23,7 @@ def execute_command(command):
     :param command:
     :return:
     '''
-    process = subprocess.Popen(command, shell=True)
-    process.wait()
-    return None
+    subprocess.run(command, shell=True, check=True)
 
 
 def run_in_parallel(commands, num_processes):
@@ -36,12 +34,13 @@ def run_in_parallel(commands, num_processes):
     :return:
     '''
     # processes = []
-    pool = multiprocessing.Pool(processes=num_processes)
-    for command in commands:
-        pool.apply_async(execute_command, args=(command, ))
-    pool.close()
-    pool.join()
-    return None
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        results = [
+            pool.apply_async(execute_command, args=(command, ))
+            for command in commands
+        ]
+        for result in results:
+            result.get()
 
 
 def check_file_in_path(file, cmd):

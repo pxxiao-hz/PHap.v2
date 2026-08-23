@@ -1,367 +1,653 @@
-#!/usr/bin/env python
-'''
-time: 2024-05-23
-author: pxxiao
-version: 1.0
-----
-description: 找到 p_utg 与 mT2T 之间的最佳匹配
-'''
+#!/usr/bin/env python3
+"""Assign selected unitigs to chromosomes and stream FASTA records.
 
+The input PAF is expected to be the output of find_collinear_chains.py. That
+step has already selected one reference target per accepted unitig,
+so this script validates that decision instead of recomputing it from fragile
+PAF tag positions or cumulative CIGAR lengths.
+"""
+
+from __future__ import annotations
 
 import argparse
-import re
-from collections import defaultdict
+import csv
+import json
 import os
-import subprocess
-import pandas as pd
-import pysam
-import pickle
+import shutil
+import tempfile
+from collections import Counter, defaultdict
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+from typing import Optional
 
 
-def fasta_read(file_input):
-    '''
-    解析 FASTA 文件，存入字典 d
-    :param file_input: .fasta
-    :return: d: id as key, seq as value
-    '''
-    d = {}
-    for lines in open(file_input, "r"):
-        if lines.startswith(">"):
-            id = lines.strip().replace(">", "")
-            d[id] = []
-        else:
-            d[id].append(lines.strip().upper())
-    for key, values in d.items():
-        d[key] = "".join(values)
-    return d
+@dataclass
+class ChainEvidence:
+    query_length: int
+    target: str
+    target_length: int
+    strand: str
+    query_intervals: list[tuple[int, int]] = field(default_factory=list)
+    matches: int = 0
+    block_length: int = 0
+    records: int = 0
+    placement_modes: set[str] = field(default_factory=set)
 
 
-def genome_aln(file_ref, file_qry, wd, args):
-    ''' p_utg vs mT2T '''
-    if not os.path.exists(f'{wd}/putg_vs_mT2T.paf'):
-        cmd_minimap2 = (f'minimap2 -cx asm5 -t {args.threads} {file_ref} {file_qry} > {wd}/putg_vs_mT2T.paf')
-        subprocess.run(cmd_minimap2, shell=True, close_fds=True)
+@dataclass(frozen=True)
+class Assignment:
+    unitig: str
+    query_length: Optional[int]
+    target: Optional[str]
+    strand: Optional[str]
+    status: str
+    reason: str
+    placement_mode: Optional[str] = None
+    records: int = 0
+    query_aligned_bp: int = 0
+    query_span_bp: int = 0
+    query_coverage: float = 0.0
+    query_span_coverage: float = 0.0
+    matches: int = 0
+    block_length: int = 0
+    identity: float = 0.0
+    reference_margin: float = 0.0
 
 
-def contig_pair_hic_links(bam_file_name, prefix, dic_fasta):
-
-    def get_contig_pair(contig1_id, contig2_id, len_contig1, len_contig2):
-        '''Returns contig pair based on contig length'''
-        return (contig1_id, contig2_id) if len_contig1 > len_contig2 else (contig2_id, contig1_id)
-
-    def output_pickle(dict, file):
-        with open(file, 'wb') as fpkl:
-            pickle.dump(dict, fpkl)
-
-    if os.path.exists(f'{prefix}.contig.pair.links.pkl'):
-        return None
-
-    dic_full_links = defaultdict(int)
-
-    ### output file
-    out_inter_contig = open(f'{prefix}.inter-contig.txt', 'w')
-
-    ### 是否处理过这个 read-pair
-    processed_read_ids = set()
-
-    ### 处理 bam 文件
-    bam = pysam.AlignmentFile(bam_file_name, 'rb')
-
-    ### 定义染色体名称和索引的映射字典
-    chromosome_names = dict(enumerate(bam.references))
-
-    for read in bam.fetch():
-        # 检查当前 read 是否处理过
-        if read.query_name not in processed_read_ids:
-            # reference id
-            ref1 = chromosome_names.get(read.reference_id, 'Unknown')
-            ref2 = chromosome_names.get(read.next_reference_id, 'Unknown')
-
-            # 检查当前 read 和 它的 mate 是否比对到同一条染色体上
-            if ref2 == ref1:     # 同一条染色体：intral-contig
-                continue
-
-            elif ref2 != ref1:       # 不同一条染色体：inter-contig
-                # inter-contig
-                out_inter_contig.write(f'{read.query_name}\t{ref1}\t{ref2}\n')
-                contig_pair = get_contig_pair(ref1, ref2, len(dic_fasta[ref1]), len(dic_fasta[ref2]))
-                dic_full_links[contig_pair] += 1
-
-            else:
-                continue
-            processed_read_ids.add(read.query_name)
-    bam.close()
-    out_inter_contig.close()
-    output_pickle(dic_full_links, f'{prefix}.contig.pair.links.pkl')
-    return None
-
-
-def calculate_contig_match_ratio(file_paf, wd, args):
-
-    def convert_to_matrix(contig_match_ratios, wd):
-
-        def export_matrix_to_csv(matrix, output_file):
-            matrix.to_csv(output_file, sep='\t', index=True)
-
-        def export_matrix_to_excel(matrix, output_file):
-            matrix.to_excel(output_file, index=True)
-
-        # Prepare data for DataFrame
-        data = []
-        putg_ids = set()
-        scaffold_ids = set()
-
-        for putg_id, scaffolds in contig_match_ratios.items():
-            putg_ids.add(putg_id)
-            for scaffold_id, values in scaffolds.items():
-                scaffold_ids.add(scaffold_id)
-                data.append([putg_id, scaffold_id, values[2]])  # values[2] is the match ratio
-        # Create DataFrame
-        df = pd.DataFrame(data, columns=['putg_id', 'scaffold_id', 'match_ratio'])
-        # Pivot DataFrame to create matrix
-        matrix = df.pivot(index='putg_id', columns='scaffold_id', values='match_ratio').fillna(0)
-        # output
-        export_matrix_to_csv(matrix, f'{wd}/contig_match_ratios.csv')
-        export_matrix_to_excel(matrix, f'{wd}/contig_match_ratios.xlsx')
-        return matrix
-
-
-    def find_max_match_ratios(contig_match_ratios, scffolds_chr, wd):
-        ''' 找到每个 contig 最佳的匹配 '''
-        max_match_ratios = {}
-        out = open(os.path.join(wd+'/putg_vs_mT2T.best.match.txt'), 'w')
-        out.write('#contig_id\tscaffold_id\n')
-        for contig_id, scaffolds in contig_match_ratios.items():
-            max_scaffold = None
-            max_ratio = 0
-            for scaffold_id, values in scaffolds.items():
-                if values[2] > max_ratio:
-                    max_ratio = values[2]
-                    max_scaffold = scaffold_id
-            max_match_ratios[contig_id] = (max_scaffold, max_ratio)
-
-        ## 去除染色体之外的匹配并更新max_match_ratios
-        dic_putg_match_mT2T = {}
-        dic_chr_posses = defaultdict(list)
-        for contig_id, scaffold_id_max_ratio in max_match_ratios.items():
-            max_scaffold, max_ratio = scaffold_id_max_ratio[0], scaffold_id_max_ratio[1]
-            if scaffold_id_max_ratio[0] in scffolds_chr:
-                out.write(contig_id + '\t' + max_scaffold + '\n')
-                dic_putg_match_mT2T[contig_id] = max_scaffold
-                dic_chr_posses[max_scaffold].append(contig_id)
-        return dic_putg_match_mT2T, dic_chr_posses
-
-
-    def find_more_than_cutoff(contig_match_ratios, scffolds_chr, wd, ratio_cutoff):
-        ''' 找到每个 contig 所有匹配率大于给定阈值的 Scaffold '''
-        dic_matches_above_cutoff = defaultdict(list)
-        out = open(os.path.join(wd, 'putg_vs_mT2T.match_above_cutoff.txt'), 'w')
-        out.write('#contig_id\tscaffold_id\tmatch_ratio\n')
-
-        for contig_id, scaffolds in contig_match_ratios.items():
-            # matching_scaffolds = []
-            for scaffold_id, values in scaffolds.items():
-                match_ratio = values[2]
-                if match_ratio > ratio_cutoff and scaffold_id in scffolds_chr:
-                    dic_matches_above_cutoff[contig_id].append((scaffold_id, match_ratio))
-                    out.write(f'{contig_id}\t{scaffold_id}\t{match_ratio}\n')
-        out.close()
-        return dic_matches_above_cutoff
-
-    chr_num = args.chr_num
-    contig_match_ratios = defaultdict(lambda: defaultdict(lambda: [0, 0, 0]))
-    dic_scaffold_length = {}        # 存储 Scaffolds 长度
-    cigar_pattern = re.compile(r'(\d+)([A-Z])')
-
-    for lines in open(file_paf, 'r'):
-        line = lines.strip().split()
-
-        # 跳过次要比对
-        if line[16][-1] == 'S':
+def parse_optional_tags(fields: list[str]) -> dict[str, tuple[str, str]]:
+    tags = {}
+    for field_value in fields:
+        parts = field_value.split(":", 2)
+        if len(parts) != 3 or len(parts[0]) != 2:
             continue
-        # match count
-        cigar = line[-1][5:]
-        matches = cigar_pattern.findall(cigar)
-        match_count = sum(int(length) for length, op in matches if op == 'M')
-
-        putg_id = line[0]
-        putg_length = int(line[1])
-        scaffold_length = int(line[6])
-        scaffold_id = line[5]
-        # putg_length, match count, match ratio
-        contig_match_ratios[putg_id][scaffold_id][0] = putg_length
-        contig_match_ratios[putg_id][scaffold_id][1] += match_count
-        contig_match_ratios[putg_id][scaffold_id][2] = contig_match_ratios[putg_id][scaffold_id][1] / putg_length
-        # scaffold length
-        dic_scaffold_length[scaffold_id] = scaffold_length
-
-    ## contig_match_ratios 写入文件
-    matrix = convert_to_matrix(contig_match_ratios, wd)
-
-    ## 获得染色体匹配数量的 scaffold id
-    scffolds_chrs = sorted(dic_scaffold_length.items(), key=lambda x: x[1], reverse=True)[:chr_num]
-    scffolds_chr = [scaffold_id for scaffold_id, length in scffolds_chrs]
-    print(scffolds_chr)
-
-    ## putg vs mT2T 最佳匹配
-    dic_putg_match_mT2T, dic_chr_posses = find_max_match_ratios(contig_match_ratios, scffolds_chr, wd)
-    print(f'Debugs: dic_putg_match_mT2T {dic_putg_match_mT2T}')
-    print(f'Debugs: dic_chr_posses {dic_chr_posses}')
-
-    dic_matches_above_cutoff = find_more_than_cutoff(contig_match_ratios, scffolds_chr, wd, 0.2)
-    print(f'Debugs: dic_matches_above_cutoff {dic_matches_above_cutoff}')
-
-    return dic_putg_match_mT2T, dic_chr_posses, dic_matches_above_cutoff
+        tag, value_type, value = parts
+        previous = tags.get(tag)
+        if previous is not None and previous != (value_type, value):
+            raise ValueError(f"Conflicting values for PAF tag {tag}")
+        tags[tag] = (value_type, value)
+    return tags
 
 
-def reassignment_contig_to_chromosome(dic_matches_above_cutoff, dic_putg_match_mT2T, prefix, min_links_threshold, top_n=3):
-
-    ## 读取 pickle 文件
-    def load_pickle_file(file_path):
-        with open(file_path, 'rb') as file:
-            data = pickle.load(file)
-        return data
-
-    ## 获得与给定 contig links 数量前三个的 contig
-    def get_top_hic_links(dic_contig_pair_hic_links, query_contig):
-        dic_link_counts = defaultdict(dict)
-        for (contig1, contig2), links_n in dic_contig_pair_hic_links.items():
-            if contig1 == query_contig:
-                dic_link_counts[query_contig][contig2] = links_n
-            elif contig2 == query_contig:
-                dic_link_counts[query_contig][contig1] = links_n
-            else:
-                continue
-        # 获取 query_contig 对应的链接字典
-        link_counts = dic_link_counts[query_contig]
-        # 对链接数量进行排序并取前 top_n 个
-        sorted_links = sorted(link_counts.items(), key=lambda x: x[1], reverse=True)[:top_n]
-        # print(f'DEBUGS link_counts', sorted_links)  # [('utg000107l', 1), ('utg000653l', 1)]
-        return sorted_links
-
-    ## Hi-C links 信息
-    dic_contig_pair_links = load_pickle_file(f'{prefix}.contig.pair.links.pkl')
-    print(f'Debugs: dic_contig_pair_links {dic_contig_pair_links}')
-
-    # for key, values in dic_contig_pair_links.items():
-    #     print(key, values)
-
-    contig_assignments = {}
-    for contig_id, matches in dic_matches_above_cutoff.items():
-        ## 利用 mT2T 比对，不能确定 contig 的归属
-        if len(matches) > 1:
-            print(contig_id, matches)
-            # 与不确定 contig，Hi-C links 数量最多的前 top_n 个 contig
-            sorted_links = get_top_hic_links(dic_contig_pair_links, contig_id)
-            print(f'Debugs -- mT2T:', contig_id, 'Hi-C links', sorted_links)
-            if len(sorted_links) == 0:      # 利用 Hi-C 数据，不能确定与 不确定 contig 相邻的 contig
-                continue
-            dic_ = defaultdict(list)
-            for i in sorted_links:
-                mate_contig_by_hic = i[0]       # hic 支持的 mate contig
-                links = i[1]                    # Hi-C reads links
-                if links < min_links_threshold:
-                    continue
-                mate_contig_belong_by_mT2T = dic_putg_match_mT2T[mate_contig_by_hic]        # hic 支持的 mate contig 属于哪个染色体（mT2T 证据）
-                # mT2T比对鉴定到比对到多个染色体的contig，利用Hi-C数据这个contig的邻近contig，邻近contig的mT2T归属染色体
-                print(f'Debugs -- mT2T:', contig_id, mate_contig_by_hic, mate_contig_belong_by_mT2T)
-                dic_[contig_id].append((mate_contig_by_hic, links, mate_contig_belong_by_mT2T))
-
-            # 候选的染色体如果都是同一个，那么就认为这个 contig 属于这个染色体；否则，定一个 links 的截取值，按照 link 的多少，选择最多的那个。
-            print(dic_)
-            candidate_chromosomes = [value[2] for key, values in dic_.items() for value in values if len(values) > 0]     # 候选染色体
-            print('candidate_chromosomes', candidate_chromosomes)       # 候选的染色体
-            if len(set(candidate_chromosomes)) == 1:         # 候选的染色体是同一个染色体
-                print('Debugs: xpx')
-                contig_assignments[contig_id] = candidate_chromosomes[0]
-            # elif len(set(candidate_chromosomes)) == 0:      # 没有候选的染色体，也就是说利用 Hi-C 数据，不能确定与 不确定 contig 相邻的 contig
-
-            else:
-                top_chromosome, top_links = None, 0
-                for contig_id, values in dic_.items():
-                    for value in values:
-                        if value[1] > top_links and value[1] > min_links_threshold:
-                            top_chromosome = value[2]
-                            top_links = value[1]
-                        else:
-                            continue
-                if top_chromosome:
-                    contig_assignments[contig_id] = top_chromosome
-                else:
-                    contig_assignments[contig_id] = 'Uncertain'
-        else:
+def union_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[list[int]] = []
+    for start, end in sorted(intervals):
+        if end <= start:
             continue
-            # contig_assignments[contig_id] = matches[0][0]
-    return contig_assignments
+        if not merged or start > merged[-1][1]:
+            merged.append([start, end])
+        else:
+            merged[-1][1] = max(merged[-1][1], end)
+    return [(start, end) for start, end in merged]
 
 
-def extract_chr_seq(wd, dic_putg, dic_chr_posses):
-    for chrom, unitigs in dic_chr_posses.items():
-        output_file = os.path.join(wd, f'{chrom}.putg.fa')
-        with open(output_file, 'w') as f:
-            for unitig in unitigs:
-                f.write('>' + unitig + '\n' + dic_putg[unitig] + '\n')
-    return None
+def read_fasta_lengths(path: Path) -> dict[str, int]:
+    lengths: dict[str, int] = {}
+    current_id = None
+    current_length = 0
+    with path.open() as handle:
+        for line_number, line in enumerate(handle, 1):
+            if line.startswith(">"):
+                if current_id is not None:
+                    lengths[current_id] = current_length
+                header = line[1:].strip()
+                if not header:
+                    raise ValueError(f"Empty FASTA header at {path}:{line_number}")
+                current_id = header.split()[0]
+                if current_id in lengths:
+                    raise ValueError(f"Duplicate FASTA ID {current_id} in {path}")
+                current_length = 0
+            elif line.strip():
+                if current_id is None:
+                    raise ValueError(f"Sequence before first FASTA header at {path}:{line_number}")
+                current_length += len(line.strip())
+    if current_id is not None:
+        if current_id in lengths:
+            raise ValueError(f"Duplicate FASTA ID {current_id} in {path}")
+        lengths[current_id] = current_length
+    if not lengths:
+        raise ValueError(f"No FASTA records found in {path}")
+    return lengths
 
 
-def extract_unchr_seq(wd, dic_putg, dic_chr_posses):
-    list_unitig_on_chr = []
-    output_file = os.path.join(wd, f'un_chr.fa')
-    for chrom, unitigs in dic_chr_posses.items():
-        for unitig in unitigs:
-            list_unitig_on_chr.append(unitig)
-    with open(output_file, 'w') as f:
-        for unitig, seq in dic_putg.items():
-            if unitig not in list_unitig_on_chr:
-                f.write('>' + unitig + '\n' + seq + '\n')
-    return None
+def validate_output_name(target: str) -> None:
+    if not target or target in {".", ".."} or Path(target).name != target:
+        raise ValueError(f"Reference target cannot be used as an output filename: {target!r}")
+
+
+def parse_collinear_paf(path: Path):
+    candidates: dict[str, dict[str, ChainEvidence]] = defaultdict(dict)
+    all_query_lengths: dict[str, int] = {}
+    secondary_queries: set[str] = set()
+    record_count = 0
+    primary_record_count = 0
+
+    with path.open() as handle:
+        for line_number, line in enumerate(handle, 1):
+            if not line.strip():
+                continue
+            record_count += 1
+            fields = line.rstrip("\n").split("\t")
+            if len(fields) < 12:
+                raise ValueError(f"Malformed PAF record at {path}:{line_number}")
+            try:
+                query = fields[0]
+                query_length = int(fields[1])
+                query_start = int(fields[2])
+                query_end = int(fields[3])
+                strand = fields[4]
+                target = fields[5]
+                target_length = int(fields[6])
+                target_start = int(fields[7])
+                target_end = int(fields[8])
+                matches = int(fields[9])
+                block_length = int(fields[10])
+            except ValueError as exc:
+                raise ValueError(f"Invalid numeric PAF field at {path}:{line_number}") from exc
+
+            if not (0 <= query_start < query_end <= query_length):
+                raise ValueError(f"Invalid query coordinates at {path}:{line_number}")
+            if not (0 <= target_start < target_end <= target_length):
+                raise ValueError(f"Invalid target coordinates at {path}:{line_number}")
+            if strand not in {"+", "-"}:
+                raise ValueError(f"Invalid PAF strand at {path}:{line_number}: {strand}")
+            previous_length = all_query_lengths.setdefault(query, query_length)
+            if previous_length != query_length:
+                raise ValueError(f"Inconsistent query length for {query} in {path}")
+
+            tags = parse_optional_tags(fields[12:])
+            tp = tags.get("tp")
+            if tp is not None and tp == ("A", "S"):
+                secondary_queries.add(query)
+                continue
+
+            primary_record_count += 1
+            key = target
+            evidence = candidates[query].get(key)
+            if evidence is None:
+                evidence = ChainEvidence(query_length, target, target_length, strand)
+                candidates[query][key] = evidence
+            elif evidence.target_length != target_length:
+                raise ValueError(f"Inconsistent target length for {target} in {path}")
+            elif evidence.strand != strand:
+                evidence.strand = "mixed"
+            evidence.query_intervals.append((query_start, query_end))
+            evidence.matches += matches
+            evidence.block_length += block_length
+            evidence.records += 1
+            placement = tags.get("pv")
+            if placement is not None:
+                evidence.placement_modes.add(placement[1])
+
+    return candidates, all_query_lengths, secondary_queries, {
+        "records": record_count,
+        "primary_records": primary_record_count,
+        "secondary_records": record_count - primary_record_count,
+    }
+
+
+def select_chromosomes(
+    reference: Optional[Path],
+    candidates: dict[str, dict[tuple[str, str], ChainEvidence]],
+    chromosome_count: int,
+):
+    if chromosome_count <= 0:
+        raise ValueError("--chr_num must be greater than zero")
+    if reference is not None:
+        lengths = read_fasta_lengths(reference)
+        source = "reference_fasta"
+        for query_candidates in candidates.values():
+            for evidence in query_candidates.values():
+                reference_length = lengths.get(evidence.target)
+                if reference_length is None:
+                    raise ValueError(
+                        f"PAF target {evidence.target} is absent from the reference FASTA"
+                    )
+                if reference_length != evidence.target_length:
+                    raise ValueError(
+                        f"PAF target length for {evidence.target} ({evidence.target_length}) "
+                        f"does not match the reference FASTA ({reference_length})"
+                    )
+    else:
+        lengths = {}
+        for query_candidates in candidates.values():
+            for evidence in query_candidates.values():
+                previous = lengths.setdefault(evidence.target, evidence.target_length)
+                if previous != evidence.target_length:
+                    raise ValueError(f"Inconsistent target length for {evidence.target}")
+        source = "paf_targets"
+    if not lengths:
+        raise ValueError("No reference targets are available for chromosome selection")
+    selected = dict(
+        sorted(lengths.items(), key=lambda item: (-item[1], item[0]))[:chromosome_count]
+    )
+    for target in selected:
+        validate_output_name(target)
+    return selected, source
+
+
+def build_assignments(
+    candidates: dict[str, dict[tuple[str, str], ChainEvidence]],
+    all_query_lengths: dict[str, int],
+    secondary_queries: set[str],
+    selected_chromosomes: set[str],
+):
+    assignments: dict[str, Assignment] = {}
+    for query, query_length in all_query_lengths.items():
+        query_candidates = candidates.get(query, {})
+        if not query_candidates:
+            reason = "secondary_only" if query in secondary_queries else "no_primary_records"
+            assignments[query] = Assignment(query, query_length, None, None, "unassigned", reason)
+            continue
+        if len(query_candidates) != 1:
+            assignments[query] = Assignment(
+                query, query_length, None, None, "unassigned", "ambiguous_target"
+            )
+            continue
+
+        evidence = next(iter(query_candidates.values()))
+        merged = union_intervals(evidence.query_intervals)
+        aligned_bp = sum(end - start for start, end in merged)
+        span_bp = merged[-1][1] - merged[0][0]
+        placement_mode = None
+        if len(evidence.placement_modes) == 1:
+            placement_mode = next(iter(evidence.placement_modes))
+        elif len(evidence.placement_modes) > 1:
+            assignments[query] = Assignment(
+                query,
+                query_length,
+                evidence.target,
+                evidence.strand,
+                "unassigned",
+                "mixed_placement_modes",
+                records=evidence.records,
+                query_aligned_bp=aligned_bp,
+                query_span_bp=span_bp,
+            )
+            continue
+
+        common = dict(
+            placement_mode=placement_mode,
+            records=evidence.records,
+            query_aligned_bp=aligned_bp,
+            query_span_bp=span_bp,
+            query_coverage=aligned_bp / query_length,
+            query_span_coverage=span_bp / query_length,
+            matches=evidence.matches,
+            block_length=evidence.block_length,
+            identity=(evidence.matches / evidence.block_length if evidence.block_length else 0.0),
+        )
+        if evidence.target not in selected_chromosomes:
+            assignments[query] = Assignment(
+                query,
+                query_length,
+                evidence.target,
+                evidence.strand,
+                "unassigned",
+                "target_not_selected_as_chromosome",
+                **common,
+            )
+        else:
+            assignments[query] = Assignment(
+                query,
+                query_length,
+                evidence.target,
+                evidence.strand,
+                "assigned",
+                "accepted_reference_placement",
+                **common,
+            )
+    return assignments
+
+
+def parse_chain_qc(path: Path):
+    rows = {}
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        required = {"query", "query_length", "best_target", "best_strand", "status", "reason"}
+        missing = required - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(f"Chain QC is missing columns: {', '.join(sorted(missing))}")
+        for row in reader:
+            query = row["query"]
+            if query in rows:
+                raise ValueError(f"Duplicate query {query} in chain QC {path}")
+            rows[query] = row
+    return rows
+
+
+def optional_int(row, field_name, default=0):
+    value = row.get(field_name, "")
+    return int(value) if value not in {None, ""} else default
+
+
+def optional_float(row, field_name, default=0.0):
+    value = row.get(field_name, "")
+    return float(value) if value not in {None, ""} else default
+
+
+def enrich_assignments_from_chain_qc(
+    assignments, qc_rows, selected_chromosomes, min_chromosome_margin
+):
+    for query, row in qc_rows.items():
+        query_length = int(row["query_length"])
+        existing = assignments.get(query)
+        if row["status"] == "accepted":
+            if existing is None:
+                raise ValueError(f"Accepted chain {query} is absent from the collinear PAF")
+            if existing.query_length != query_length:
+                raise ValueError(f"Query length mismatch for {query} between PAF and chain QC")
+            if existing.target != row["best_target"] or existing.strand != row["best_strand"]:
+                raise ValueError(f"Selected target/strand mismatch for {query} between PAF and chain QC")
+            assignments[query] = replace(
+                existing,
+                reference_margin=optional_float(row, "reference_margin"),
+            )
+            continue
+        if existing is not None:
+            raise ValueError(f"Rejected chain {query} is unexpectedly present in the collinear PAF")
+        chain_reason = row["reason"] or "unspecified"
+        target = row["best_target"] or None
+        strand = row["best_strand"] or None
+        reference_margin = optional_float(row, "reference_margin")
+        status = "unassigned"
+        reason = f"chain_rejected:{chain_reason}"
+        if target is not None and target not in selected_chromosomes:
+            reason = f"target_not_selected_as_chromosome:{chain_reason}"
+        elif target is not None and strand is not None and reference_margin >= min_chromosome_margin:
+            status = "assigned"
+            reason = f"rescued_best_chromosome:{chain_reason}"
+        elif target is not None:
+            reason = f"chromosome_margin_below_threshold:{chain_reason}"
+        assignments[query] = Assignment(
+            query,
+            query_length,
+            target,
+            strand,
+            status,
+            reason,
+            placement_mode=row.get("placement_mode") or None,
+            records=optional_int(row, "chain_alignments"),
+            query_aligned_bp=optional_int(row, "query_covered_bp"),
+            query_span_bp=optional_int(row, "query_span_bp"),
+            query_coverage=optional_float(row, "query_coverage"),
+            query_span_coverage=optional_float(row, "query_span_coverage"),
+            identity=optional_float(row, "chain_identity"),
+            reference_margin=reference_margin,
+        )
+    return assignments
+
+
+ASSIGNMENT_FIELDS = [
+    "unitig",
+    "fasta_length",
+    "paf_query_length",
+    "target",
+    "strand",
+    "status",
+    "reason",
+    "placement_mode",
+    "paf_records",
+    "query_aligned_bp",
+    "query_span_bp",
+    "query_coverage",
+    "query_span_coverage",
+    "identity",
+    "reference_margin",
+]
+
+
+def assignment_row(assignment: Assignment, fasta_length: int):
+    return {
+        "unitig": assignment.unitig,
+        "fasta_length": fasta_length,
+        "paf_query_length": assignment.query_length if assignment.query_length is not None else "",
+        "target": assignment.target or "",
+        "strand": assignment.strand or "",
+        "status": assignment.status,
+        "reason": assignment.reason,
+        "placement_mode": assignment.placement_mode or "",
+        "paf_records": assignment.records,
+        "query_aligned_bp": assignment.query_aligned_bp,
+        "query_span_bp": assignment.query_span_bp,
+        "query_coverage": f"{assignment.query_coverage:.6f}",
+        "query_span_coverage": f"{assignment.query_span_coverage:.6f}",
+        "identity": f"{assignment.identity:.6f}",
+        "reference_margin": f"{assignment.reference_margin:.6f}",
+    }
+
+
+def stream_fasta_outputs(
+    fasta: Path,
+    temporary_directory: Path,
+    assignments: dict[str, Assignment],
+):
+    chromosome_handles = {}
+    chromosome_stats = defaultdict(lambda: {"unitigs": 0, "bp": 0})
+    unassigned_stats = {"unitigs": 0, "bp": 0}
+    rows = []
+    seen = set()
+    current_id = None
+    current_assignment = None
+    current_handle = None
+    current_length = 0
+    unassigned_path = temporary_directory / "un_chr.fa"
+
+    def finish_record():
+        if current_id is None:
+            return
+        if (
+            current_assignment.query_length is not None
+            and current_assignment.query_length != current_length
+        ):
+            raise ValueError(
+                f"PAF query length for {current_id} ({current_assignment.query_length}) "
+                f"does not match the p_utg FASTA ({current_length})"
+            )
+        if current_assignment.status == "assigned":
+            stats = chromosome_stats[current_assignment.target]
+        else:
+            stats = unassigned_stats
+        stats["unitigs"] += 1
+        stats["bp"] += current_length
+        rows.append(assignment_row(current_assignment, current_length))
+
+    with fasta.open() as source, unassigned_path.open("w") as unassigned_handle:
+        try:
+            for line_number, line in enumerate(source, 1):
+                if line.startswith(">"):
+                    finish_record()
+                    header = line[1:].strip()
+                    if not header:
+                        raise ValueError(f"Empty FASTA header at {fasta}:{line_number}")
+                    current_id = header.split()[0]
+                    if current_id in seen:
+                        raise ValueError(f"Duplicate FASTA ID {current_id} in {fasta}")
+                    seen.add(current_id)
+                    current_assignment = assignments.get(current_id)
+                    if current_assignment is None:
+                        current_assignment = Assignment(
+                            current_id,
+                            None,
+                            None,
+                            None,
+                            "unassigned",
+                            "no_accepted_collinear_chain",
+                        )
+
+                    if current_assignment.status == "assigned":
+                        target = current_assignment.target
+                        current_handle = chromosome_handles.get(target)
+                        if current_handle is None:
+                            path = temporary_directory / f"{target}.putg.fa"
+                            current_handle = path.open("w")
+                            chromosome_handles[target] = current_handle
+                    else:
+                        current_handle = unassigned_handle
+                    current_handle.write(line if line.endswith("\n") else line + "\n")
+                    current_length = 0
+                elif line.strip():
+                    if current_id is None:
+                        raise ValueError(
+                            f"Sequence before first FASTA header at {fasta}:{line_number}"
+                        )
+                    sequence = line.strip()
+                    current_handle.write(sequence + "\n")
+                    current_length += len(sequence)
+            finish_record()
+        finally:
+            for handle in chromosome_handles.values():
+                handle.close()
+
+    missing = sorted(set(assignments) - seen)
+    if missing:
+        examples = ", ".join(missing[:5])
+        raise ValueError(
+            f"{len(missing)} PAF query IDs are missing from the p_utg FASTA; examples: {examples}"
+        )
+    return rows, dict(chromosome_stats), unassigned_stats
+
+
+def write_metadata(
+    temporary_directory: Path,
+    rows,
+    selected_chromosomes,
+    selection_source,
+    chromosome_stats,
+    unassigned_stats,
+    paf_stats,
+    paths,
+    min_chromosome_margin,
+):
+    assignment_path = temporary_directory / "chromosome_assignments.tsv"
+    with assignment_path.open("w", newline="") as handle:
+        writer = csv.DictWriter(
+            handle, fieldnames=ASSIGNMENT_FIELDS, delimiter="\t", lineterminator="\n"
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    with (temporary_directory / "putg_vs_mT2T.best.match.txt").open("w") as handle:
+        handle.write("#contig_id\tscaffold_id\n")
+        for row in rows:
+            if row["status"] == "assigned":
+                handle.write(f'{row["unitig"]}\t{row["target"]}\n')
+
+    reason_counts = Counter(row["reason"] for row in rows)
+    assigned_unitigs = sum(value["unitigs"] for value in chromosome_stats.values())
+    assigned_bp = sum(value["bp"] for value in chromosome_stats.values())
+    summary = {
+        "inputs": {key: str(value.resolve()) for key, value in paths.items() if value is not None},
+        "chromosome_selection_source": selection_source,
+        "selected_chromosomes": selected_chromosomes,
+        "paf": paf_stats,
+        "parameters": {"min_chromosome_margin": min_chromosome_margin},
+        "fasta": {
+            "unitigs": assigned_unitigs + unassigned_stats["unitigs"],
+            "bp": assigned_bp + unassigned_stats["bp"],
+        },
+        "assigned": {"unitigs": assigned_unitigs, "bp": assigned_bp},
+        "unassigned": unassigned_stats,
+        "assignment_reason_counts": dict(sorted(reason_counts.items())),
+        "chromosomes": dict(sorted(chromosome_stats.items())),
+    }
+    with (temporary_directory / "chromosome_assignment.summary.json").open("w") as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    return summary
+
+
+def install_outputs(temporary_directory: Path, output_directory: Path):
+    generated = {path.name for path in temporary_directory.iterdir() if path.is_file()}
+    for old_path in output_directory.glob("*.putg.fa"):
+        if old_path.name not in generated:
+            old_path.unlink()
+    for obsolete_name in (
+        "contig_match_ratios.csv",
+        "contig_match_ratios.xlsx",
+        "putg_vs_mT2T.match_above_cutoff.txt",
+    ):
+        obsolete = output_directory / obsolete_name
+        if obsolete.exists():
+            obsolete.unlink()
+    for temporary_path in sorted(temporary_directory.iterdir()):
+        if temporary_path.is_file():
+            os.replace(temporary_path, output_directory / temporary_path.name)
+
+
+def run(args):
+    if not 0.0 <= args.min_chromosome_margin <= 1.0:
+        raise ValueError("--min-chromosome-margin must be between zero and one")
+    output_directory = args.wd.resolve()
+    output_directory.mkdir(parents=True, exist_ok=True)
+    candidates, query_lengths, secondary_queries, paf_stats = parse_collinear_paf(args.paf)
+    selected, selection_source = select_chromosomes(args.mT2T, candidates, args.chr_num)
+    assignments = build_assignments(candidates, query_lengths, secondary_queries, set(selected))
+    if args.chain_qc is not None:
+        assignments = enrich_assignments_from_chain_qc(
+            assignments,
+            parse_chain_qc(args.chain_qc),
+            set(selected),
+            args.min_chromosome_margin,
+        )
+
+    temporary_directory = Path(tempfile.mkdtemp(prefix=".chr_seq.", dir=output_directory))
+    try:
+        rows, chromosome_stats, unassigned_stats = stream_fasta_outputs(
+            args.p_utg, temporary_directory, assignments
+        )
+        summary = write_metadata(
+            temporary_directory,
+            rows,
+            selected,
+            selection_source,
+            chromosome_stats,
+            unassigned_stats,
+            paf_stats,
+            {
+                "p_utg": args.p_utg,
+                "paf": args.paf,
+                "mT2T": args.mT2T,
+                "chain_qc": args.chain_qc,
+            },
+            args.min_chromosome_margin,
+        )
+        install_outputs(temporary_directory, output_directory)
+    finally:
+        shutil.rmtree(temporary_directory, ignore_errors=True)
+    print(
+        "Chromosome extraction: "
+        f'{summary["assigned"]["unitigs"]} assigned, '
+        f'{summary["unassigned"]["unitigs"]} unassigned'
+    )
+    return summary
 
 
 def parse_arguments():
-    parser = argparse.ArgumentParser('Find best match between mT2T and p_utg')
-    parser.add_argument('--wd', required=True, help='Workding directory for this scripts')
-    parser.add_argument('--paf', required=True, type=str, help='path to putg vs mT2T paf file')
-    parser.add_argument('--chr_num', type=int, default=12, help='number of chromosomes [12]')
-    parser.add_argument('--p_utg', required=True, type=str, help='path to putg')
-    args = parser.parse_args()
-    return args
+    parser = argparse.ArgumentParser(
+        description="Assign accepted collinear p_utg chains to mT2T chromosomes"
+    )
+    parser.add_argument("--wd", required=True, type=Path, help="Output directory")
+    parser.add_argument("--paf", required=True, type=Path, help="Accepted collinear PAF")
+    parser.add_argument("--chain-qc", type=Path, help="Collinear-chain QC with rejection reasons")
+    parser.add_argument("--chr_num", type=int, default=12, help="Number of chromosomes [12]")
+    parser.add_argument(
+        "--min-chromosome-margin",
+        type=float,
+        default=0.05,
+        help="Minimum (best - second) / best chain score for chromosome rescue [0.05]",
+    )
+    parser.add_argument("--p_utg", required=True, type=Path, help="p_utg FASTA")
+    parser.add_argument(
+        "--mT2T",
+        type=Path,
+        help="mT2T FASTA; recommended for chromosome selection independent of PAF hits",
+    )
+    return parser.parse_args()
 
 
 def main():
-
-    args = parse_arguments()
-
-    # prefix = 'test.links'
-
-    dic_putg = fasta_read(args.p_utg)
-    paf_file = args.paf
-    wd = args.wd
-
-    ### step1: p_utg vs mT2T
-    # os.makedirs('01.putg_vs_mT2T', exist_ok=True)
-    # genome_aln(args.mT2T, args.putg, '01.putg_vs_mT2T', args)
-
-    ### step2: get best match between p_utg and mT2T
-    dic_putg_match_mT2T, dic_chr_posses, dic_matches_above_cutoff = calculate_contig_match_ratio(paf_file, wd, args)
-
-    ### step3: Output the sequence of each chromosome
-    extract_chr_seq(wd, dic_putg, dic_chr_posses)
-
-    ### step4: Output sequences that are not on chromosome
-    extract_unchr_seq(wd, dic_putg, dic_chr_posses)
-
-    # ### step3: 利用 Hi-C reads 的信息，确定多个比对的 contig 属于哪个染色体
-    # contig_pair_hic_links(args.bam, prefix, dic_putg)
-    # contig_assignments = reassignment_contig_to_chromosome(dic_matches_above_cutoff, dic_putg_match_mT2T, prefix, args.min_links_threshold)
-    # print(contig_assignments)
-    #
-    # ## output: mT2T 比对之后，不能确定的染色体归属的 contig，再次利用 Hi-C 数据，能够确定的 contig 输出到一个新的文件当中。
-    # output_file = open('01.putg_vs_mT2T/putg_vs_mT2T_Hi-C.reassignments.contigs.txt', 'w')
-    # for contig, value in contig_assignments.items():
-    #     output_file.write(contig + '\t' + value + '\n')
-    #     print(contig, value)
-    # output_file.close()
+    run(parse_arguments())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

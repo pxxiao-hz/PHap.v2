@@ -1,0 +1,5 @@
+intervaltree
+numpy
+pandas
+pysam
+scipy

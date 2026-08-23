@@ -53,6 +53,7 @@ To do:
 
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import pickle
 import subprocess
 import sys
@@ -130,8 +131,6 @@ def adjust_hic_signals(hic_data, dic_contig_type):
         adjusted_count = count * weight1 * weight2
         adjusted_hic_data[(ctg1, ctg2)] = adjusted_count
 
-        print(f"Adjusted Hi-C signal between {ctg1} and {ctg2}: Original = {count}, Adjusted = {adjusted_count}")
-
     return adjusted_hic_data
 
 
@@ -140,7 +139,7 @@ def parse_pickle(fa_dict, pickle_file, dic_contig_type):
     with open(pickle_file, 'rb') as f:
         full_link_dict = pickle.load(f)
 
-    adjust_hic_signals(full_link_dict, dic_contig_type)
+    full_link_dict = adjust_hic_signals(full_link_dict, dic_contig_type)
 
     # sort by contig length
     sorted_ctg_list = sorted([(ctg, fa_dict[ctg][1]) for ctg in fa_dict], key=lambda x: x[1], reverse=True)
@@ -241,7 +240,7 @@ def unitig_overlap_ratio(file_allelic_table):
     return overlap_ratios
 
 
-def genotype_allelic_table(file_allelic_table, dic_contig_type, dic_contig_hic, dic_overlap_ratios, RE_site_dict):
+def genotype_allelic_table(file_allelic_table, dic_contig_type, dic_contig_hic, RE_site_dict):
     def get_contig_types(contigs, dic_contig_type):
         return [dic_contig_type.get(contig, 'unknown') for contig in contigs]
 
@@ -277,16 +276,14 @@ def genotype_allelic_table(file_allelic_table, dic_contig_type, dic_contig_hic, 
         # 筛选出密度最高的 groups
         group_density.sort(key=lambda x: x[1], reverse=True)
 
-        # debugs -- 输出 new_unitig 以及 候选的 group links density
-        print(f'Debugs: new_unitig group_density {new_unitig} {group_density}')
+        selected_groups = [
+            idx for idx, density in group_density if density > 0
+        ][:required_group_count]
 
-        selected_groups = [idx for idx, density in group_density[:required_group_count]]
-
-        # 如果找到合适的 groups，则返回它们的索引
-        if selected_groups:
+        # Collapsed unitigs require enough independently supported groups.
+        if len(selected_groups) == required_group_count:
             return selected_groups
         else:
-            print(f"No suitable group found for {new_unitig} based on Hi-C link density.")
             return None
 
     def find_group_for_new_unitig(new_unitig, groups, dic_contig_hic, dic_contig_type, threshold=50):
@@ -401,190 +398,80 @@ def genotype_allelic_table(file_allelic_table, dic_contig_type, dic_contig_hic, 
 
         return remaining_groups, remaining_to_original_index
 
-    # 创建四个 list，用来存储 haplotype‘s unitig
     g1, g2, g3, g4 = [], [], [], []
     groups = [g1, g2, g3, g4]
-    first_line = True  # 标志位，用于标记第一行
-    for lines in open(file_allelic_table, 'r'):
-        line = lines.strip().split()
-        ## 染色体的开头
-        if first_line:
+    dosage = {
+        'haplotig': 1,
+        'diplotig': 2,
+        'triplotig': 3,
+        'tetraplotig': 4,
+    }
+    first_line = True
+    with open(file_allelic_table) as allelic_table:
+        for lines in allelic_table:
+            line = lines.strip().split()
+            if not line:
+                continue
             unitigs = line[3:]
             unitig_types = get_contig_types(unitigs, dic_contig_type)
-            print(unitig_types)
-            ## 一个 diplotig，两个 haplotig
-            if unitig_types.count('diplotig') == 1 and len(unitigs) == 3:
-                diplotig_index = unitig_types.index('diplotig')
-                haplotig_indices = [i for i, t in enumerate(unitig_types) if t == 'haplotig']
-                g1.append(unitigs[diplotig_index])
-                g2.append(unitigs[diplotig_index])
-                g3.append(unitigs[haplotig_indices[0]])
-                g4.append(unitigs[haplotig_indices[1]])
 
-            ## 一个  triplotig，一个 haplotig
-            elif unitig_types.count('triplotig') == 1 and len(unitigs) == 2:
-                triplotig_index = unitig_types.index('triplotig')
-                haplotig_index = unitig_types.index('haplotig')
-                g1.append(unitigs[triplotig_index])
-                g2.append(unitigs[triplotig_index])
-                g3.append(unitigs[triplotig_index])
-                g4.append(unitigs[haplotig_index])          # 不是 g3, 是 g4! 这里竟然写错了！
-
-            ## 一个 tetraplotig
-            elif unitig_types.count('tetraplotig') == 1 and len(unitigs) == 1:
-                tetraplotig_index = unitig_types.index('tetraplotig')
-                g1.append(unitigs[tetraplotig_index])
-                g2.append(unitigs[tetraplotig_index])
-                g3.append(unitigs[tetraplotig_index])
-                g4.append(unitigs[tetraplotig_index])
-
-            ## 四个 unitig 全部为 haplotig
-            elif len(unitigs) == 4:
-                g1.append(unitigs[0])
-                g2.append(unitigs[1])
-                g3.append(unitigs[2])
-                g4.append(unitigs[3])
-            elif unitig_types.count('diplotig') ==0 and unitig_types.count('triplotig') == 0 and unitig_types.count('tetraplotig') == 0:
-                # 只有 haplotig，但数量不够四个
-                for i, unitig in enumerate(unitigs):
-                    groups[i % 4].append(unitig)
-            else:
-                print('Please check your input')
-            first_line = False  # 标志第一行已经处理完毕
-        else:
-            ##
-            # 处理染色体后端的情况，不做处理或进行其他操作
-            unitigs = line[3:]
-            unitig_types = get_contig_types(unitigs, dic_contig_type)       # unitig type [list]: haplotig or diplotig or triplotig or tetraplotig
-            print(f'Debugs: unitig_types {unitig_types}')
-
-            processed_groups = set()  # 跟踪在这一行已经处理过的 groups
-            processed_unitigs = set()   # 已经处理过的 unitigs
-
-            ## 首先，检查所有 unitig 是否已经存在某个 group 中
-            for unitig in unitigs:      # 遍历 unitigs
-                for group in groups:
-                    if unitig in group and groups.index(group) not in processed_groups:
-                        group.append(unitig)
-                        processed_unitigs.add(unitig)
-                        processed_groups.add(groups.index(group))
-                        # break     # 这里运算速度变慢了
-
-            ## 将每个 unitig 分配给已有的 group
-            for unitig in unitigs:
-                if unitig in processed_unitigs: continue
-
-                for group in groups:
-                    # if unitig in group and groups.index(group) not in processed_groups:
-                    if unitig in group:
-                        print(f'Debugs: {unitig}')
-                        group.append(unitig)
-                        processed_unitigs.add(unitig)
-                        processed_groups.add(groups.index(group))
-                        # break     # # 这里运算速度变慢了
-            print(f'Debugs processed_groups {processed_groups}')
-
-            ##
-            for i, unitig in enumerate(unitigs):
-                if unitig in processed_unitigs:
-                    print('unitig', i, unitig, unitigs)
-                    continue
-
-                # ## 针对 haplotype 开头的 unitig 进行处理
-                # remaining_groups = [groups[i] for i in range(len(groups)) if i not in processed_groups]     # 待处理的 groups: [[u1, u2...], [u11, u22, ...], ]
-                # 假设每个 remaining_groups 中的组在原始 groups 中的索引是已知的，可以通过一个字典进行映射
-                # remaining_to_original_index = {i: groups.index(group) for i, group in enumerate(remaining_groups)}
-
-                remaining_groups, remaining_to_original_index = get_remaining_to_original_index(groups,
-                                                                                                processed_groups)
-
-                print(f'Debugs processed_groups remaining_groups {unitig} {processed_groups} {remaining_groups}')
-                print(f'Debugs: remaining_to_original_index {remaining_to_original_index}')
-                print(len(g1), g1)
-                print(len(g2), g2)
-                print(len(g3), g3)
-                print(len(g4), g4)
-
-                ## allelic unitig 之间的信号值 -- （这里没有考虑 contig type）
-                allelic_unitig_signals = [
-                    next((count for u, count in dic_contig_hic.get(unitig, []) if u == other_unitig), 0)
-                    for other_unitig in unitigs if other_unitig != unitig
-                ]
-                max_allelic_signal = max(allelic_unitig_signals, default=0)
-
-                ## allelic other unitig
-                allelic_other_unitigs = [u for u in unitigs if u != unitig]
-
-                ## unitig 与 group unitig 之间的信号值
-                group_signals = []
-                for group in groups:
-                    group_signal = max(
-                        (next((count for u, count in dic_contig_hic.get(u, []) if u == unitig), 0)
-                         for u in group), default=0
+            if first_line:
+                total_dosage = sum(dosage.get(unitig_type, 0) for unitig_type in unitig_types)
+                if total_dosage > 4 or any(unitig_type not in dosage for unitig_type in unitig_types):
+                    raise ValueError(
+                        f'Invalid dosage composition in allelic table row: {lines.rstrip()}'
                     )
-                    group_signals.append(group_signal)
-                max_group_signal = max(group_signals, default=0)
+                group_index = 0
+                for unitig, unitig_type in zip(unitigs, unitig_types):
+                    for _ in range(dosage[unitig_type]):
+                        groups[group_index].append(unitig)
+                        group_index += 1
+                first_line = False
+                continue
 
-                print(f'Debugs: unitig, unitigs, max_allelic_signal, max_group_signal, remaining_groups {unitig} {unitigs} {max_allelic_signal} {max_group_signal} {remaining_groups}')
+            processed_groups = set()
+            processed_unitigs = set()
+            for unitig in unitigs:
+                for group_index, group in enumerate(groups):
+                    if unitig in group:
+                        processed_unitigs.add(unitig)
+                        processed_groups.add(group_index)
 
-                ## 如果 allelic 之间的信号值更大，并且两者之间的 overlap 比例较低，则将 allelic unitig 归为一个 haplotype
-                if max_allelic_signal >= max_group_signal > 100 and dic_overlap_ratios[(unitig, allelic_other_unitigs[allelic_unitig_signals.index(max_allelic_signal)])] < 0.2 and dic_overlap_ratios[(allelic_other_unitigs[allelic_unitig_signals.index(max_allelic_signal)], unitig)] < 0.2:
-                    # allelic unitig 之间的信号更强，将 allelic unitig 归为一类
-                    max_signal_index = allelic_unitig_signals.index(max_allelic_signal)
-                    allelic_unitig = unitigs[max_signal_index]
+            for unitig in unitigs:
+                if unitig in processed_unitigs:
+                    continue
+                remaining_groups, remaining_to_original_index = get_remaining_to_original_index(
+                    groups, processed_groups
+                )
+                target_group_indices = find_group_for_new_unitig1(
+                    unitig,
+                    remaining_groups,
+                    dic_contig_hic,
+                    dic_contig_type,
+                    RE_site_dict,
+                )
 
-                    # 找到 allelic unitig 所在的 group 并添加当前 unitig
-                    for group in groups:
-                        if allelic_unitig in group:
-                            group.append(unitig)
-                            processed_unitigs.add(unitig)
-                            # break
-                else:
-                    ## 按照原始逻辑分配 unitig
-                    # target_group_indices = find_group_for_new_unitig(unitig, remaining_groups, dic_contig_hic, dic_contig_type)
-                    target_group_indices = find_group_for_new_unitig1(unitig, remaining_groups, dic_contig_hic, dic_contig_type, RE_site_dict)
-                    print(f'Debugs target_group_indices {unitig} {target_group_indices}')
-
-                    if target_group_indices is not None:
-                        for target_group_index in target_group_indices:
-                            target_group = remaining_groups[target_group_index]
-                            # original_group_index = remaining_to_original_index[target_group_index]
-                            original_group_index = remaining_to_original_index[target_group_index]
-                            print(f'Debugs: target_group {target_group} {target_group_index}')      # Debugs: target_group [] 2
-                            print(f'Debugs: original_group_index {original_group_index}')
-
-                            # 如果 group 中只有一个元素且与 new_unitig 都没有 Hi-C 信号，则替换
-                            if len(target_group) == 1 or len(set(target_group)) == 1:
-                                last_unitig = target_group[-1]
-                                links = dic_contig_hic.get(last_unitig, [])
-                                link_count = next((count for u, count in links if u == unitig), 0)
-                                # 开头的 unitig 没有 Hi-C 信号，不管是一个 unitig，还是多个相同的 unitig
-                                if link_count == 0 and last_unitig not in dic_contig_hic:
-                                    print(f'Debugs: Replacing {last_unitig} with {unitig} in group {target_group_index + 1}.')
-                                    # 替换
-                                    for i, u in enumerate(target_group):
-                                        target_group[i] = unitig
-                                else:
-                                    target_group.append(unitig)
-                            else:
-                                groups[original_group_index].append(unitig)
-
-                            processed_groups.add(original_group_index)
-                    else:
-                        #
-                        if all(len(group) > 0 for group in groups):
-                            print(f'Debugs: No valid Hi-C signal for {unitig}, discarding.')
-                        else:
-                            # 当 group 为空时，添加 unitig
-                            empty_group = next(group for group in groups if len(group) == 0)
-                            empty_group.append(unitig)
+                if target_group_indices is not None:
+                    for target_group_index in target_group_indices:
+                        original_group_index = remaining_to_original_index[target_group_index]
+                        if unitig not in groups[original_group_index]:
+                            groups[original_group_index].append(unitig)
+                        processed_groups.add(original_group_index)
+                    processed_unitigs.add(unitig)
+                elif not all(groups):
+                    # Projection evidence may initialize empty chromosome-end
+                    # groups even when the unitig has no observed Hi-C contact.
+                    required = dosage.get(dic_contig_type.get(unitig), 1)
+                    empty_groups = [group for group in groups if not group]
+                    for group in empty_groups[:required]:
+                        group.append(unitig)
 
     return g1, g2, g3, g4
 
 
 def list_to_file(list_1, file_name):
     out = open(file_name, 'w')
-    list_1 = list(set(list_1))
+    list_1 = sorted(set(list_1))
     for i in list_1:
         out.write(i + '\n')
     out.close()
@@ -592,7 +479,7 @@ def list_to_file(list_1, file_name):
 
 def list_to_cluster_file(list_1, list_name, file='group.cluster.txt'):
     out = open(file, 'a+')
-    list_1 = list(set(list_1))
+    list_1 = sorted(set(list_1))
     out.write(list_name + '\t' + str(len(list_1)) + '\t' + ' '.join(list_1) + '\n')
     out.close()
 
@@ -617,7 +504,7 @@ def write_combined_genotypes_to_file(g1, g2, g3, g4, filename):
 
 def output_fa_from_list(list_1, dic_fasta, file_name):
     out = open(file_name, 'w')
-    list_1 = list(set(list_1))
+    list_1 = sorted(set(list_1))
     for i in list_1:
         if i in dic_fasta:
             out.write('>' + i + '\n' + dic_fasta[i] + '\n')
@@ -653,63 +540,79 @@ def false_genotype_unitig(g_list, dic_fasta, dic_contig_hic):
     return corrected_list
 
 
-def cluster(fasta, full_links, flank, contig_type, allelic_table_file, wd):
-    dic_fasta = fasta_read(fasta)
-    fa_dict = parse_fasta(fasta, flank)
-    dic_contig_type = parse_contig_type(contig_type)
-    full_link_dict, sorted_ctg_list, RE_site_dict = parse_pickle(fa_dict, full_links, dic_contig_type)
-    out = open('full.links.txt', 'w')
-    for key, value in full_link_dict.items():
-        out.write(str(key) + '\t' + str(value) + '\n')
-    out.close()
+def cluster(
+    fasta,
+    full_links,
+    flank,
+    contig_type,
+    allelic_table_file,
+    wd,
+    ploidy=4,
+    balance_weight=1.0,
+    max_refinement_rounds=10,
+    max_phase_block_rounds=10,
+    min_phase_block_gain=0.005,
+    max_phase_boundary_relaxations=1,
+    max_phase_boundary_overlap=0.30,
+    max_constraint_relaxation_rounds=50,
+    min_constraint_relaxation_gain=0.0,
+    min_constraint_relaxation_links=5.0,
+    min_constraint_relaxation_margin=0.10,
+    max_constraint_relaxations_per_move=2,
+    max_constraint_relaxation_overlap=0.30,
+    max_phase_interval_rounds=4,
+    max_phase_interval_relaxations=2,
+    max_backtracks=1_000_000,
+    constraint_relaxation='weakest',
+    protected_long_unitig_length=5_000_000,
+    protected_length_ratio=5.0,
+    protected_short_overlap=0.50,
+    hic_link_normalization='dosage',
+):
+    cluster_script = os.path.join(
+        os.path.dirname(os.path.realpath(__file__)),
+        '..',
+        'utils',
+        'cluster_allelic_unitigs_v2.py',
+    )
+    command = [
+        sys.executable,
+        cluster_script,
+        '--fasta', fasta,
+        '--full-links', full_links,
+        '--contig-type', contig_type,
+        '--allelic-table', allelic_table_file,
+        '--output-dir', wd,
+        '--ploidy', str(ploidy),
+        '--balance-weight', str(balance_weight),
+        '--max-refinement-rounds', str(max_refinement_rounds),
+        '--max-phase-block-rounds', str(max_phase_block_rounds),
+        '--min-phase-block-gain', str(min_phase_block_gain),
+        '--max-phase-boundary-relaxations', str(max_phase_boundary_relaxations),
+        '--max-phase-boundary-overlap', str(max_phase_boundary_overlap),
+        '--max-constraint-relaxation-rounds', str(max_constraint_relaxation_rounds),
+        '--min-constraint-relaxation-gain', str(min_constraint_relaxation_gain),
+        '--min-constraint-relaxation-links', str(min_constraint_relaxation_links),
+        '--min-constraint-relaxation-margin', str(min_constraint_relaxation_margin),
+        '--max-constraint-relaxations-per-move', str(max_constraint_relaxations_per_move),
+        '--max-constraint-relaxation-overlap', str(max_constraint_relaxation_overlap),
+        '--max-phase-interval-rounds', str(max_phase_interval_rounds),
+        '--max-phase-interval-relaxations', str(max_phase_interval_relaxations),
+        '--max-backtracks', str(max_backtracks),
+        '--constraint-relaxation', constraint_relaxation,
+        '--protected-long-unitig-length', str(protected_long_unitig_length),
+        '--protected-length-ratio', str(protected_length_ratio),
+        '--protected-short-overlap', str(protected_short_overlap),
+        '--hic-link-normalization', hic_link_normalization,
+    ]
+    if flank is not None:
+        command.extend(['--flank', str(flank)])
+    subprocess.run(command, check=True)
 
-    ### step1: 解析获得 unitig flank Hi-C links
-    dic_pair_hic = load_pickle_file(full_links)
-    out = open('flank.links.txt', 'w')
-    for key, value in dic_pair_hic.items():
-        out.write(str(key) + '\t' + str(value) + '\n')
-        # print(key, value)
-    out.close()
 
-    dic_contig_hic = get_link_list(dic_pair_hic)
-    dic_overlap_ratios = unitig_overlap_ratio(allelic_table_file)
-    g1, g2, g3, g4 = genotype_allelic_table(allelic_table_file,
-                                            dic_contig_type,
-                                            dic_contig_hic,
-                                            dic_overlap_ratios,
-                                            RE_site_dict)
-    ### 错误分型的 unitig
-    g1 = false_genotype_unitig(g1, dic_fasta, dic_contig_hic)
-    g2 = false_genotype_unitig(g2, dic_fasta, dic_contig_hic)
-    g3 = false_genotype_unitig(g3, dic_fasta, dic_contig_hic)
-    g4 = false_genotype_unitig(g4, dic_fasta, dic_contig_hic)
-    print(f'Debugs: g1 {g1}')
-    print(f'Debugs: g2 {g2}')
-    print(f'Debugs: g3 {g3}')
-    print(f'Debugs: g4 {g4}')
-    list_to_file(g1, f'{wd}/g1.txt')
-    list_to_file(g2, f'{wd}/g2.txt')
-    list_to_file(g3, f'{wd}/g3.txt')
-    list_to_file(g4, f'{wd}/g4.txt')
-    if os.path.exists('group.cluster.txt'):
-        os.remove('group.cluster.txt')
-    list_to_cluster_file(g1, 'group1')
-    list_to_cluster_file(g2, 'group2')
-    list_to_cluster_file(g3, 'group3')
-    list_to_cluster_file(g4, 'group4')
-    output_fa_from_list(g1, dic_fasta, f'{wd}/g1.fa')
-    output_fa_from_list(g2, dic_fasta, f'{wd}/g2.fa')
-    output_fa_from_list(g3, dic_fasta, f'{wd}/g3.fa')
-    output_fa_from_list(g4, dic_fasta, f'{wd}/g4.fa')
-    # note: 这里的g1, g2, g3, g4已经更改了，末尾添加了' '
-    write_combined_genotypes_to_file(g1, g2, g3, g4, f'{wd}/g1g2g3g4.txt')
-    ## merge g1+g2+g3+g4
-    if os.path.exists('g1g2g3g4.fa'):
-        os.remove('g1g2g3g4.fa')
-    rename_id(f'{wd}/g1.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g2.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g3.fa', f'{wd}/g1g2g3g4.fa')
-    rename_id(f'{wd}/g4.fa', f'{wd}/g1g2g3g4.fa')
+def run_logged_command(command, stdout_path, stderr_path):
+    with open(stdout_path, 'w') as stdout, open(stderr_path, 'w') as stderr:
+        subprocess.run(command, stdout=stdout, stderr=stderr, check=True)
 
 
 def parse_arguments():
@@ -719,10 +622,18 @@ def parse_arguments():
     parser.add_argument('--mT2T', required=True, type=str, help='Path to mT2T file or reference genome')
     parser.add_argument('--contig_type', required=True, type=str, help='Path to contig type from dosage analysis')
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
+    parser.add_argument('--paf', type=str, help='Reuse an existing raw p_utg vs mT2T PAF')
+    parser.add_argument('--gfa', type=str, help='hifiasm GFA for graph-aware conflict filtering')
+    parser.add_argument('--output_dir', type=str, default='02.cluster.v2', help='Output directory [02.cluster.v2]')
+    parser.add_argument('--table_only', action='store_true', help='Stop after generating the v2 allelic table and QC files')
+    parser.add_argument(
+        '--stop_after', choices=['table', 'chr_seq', 'cluster', 'recluster', 'rescue'],
+        default='rescue', help='Stop after the selected completed workflow stage [rescue]'
+    )
 
     find_longest = parser.add_argument_group('>>> Parameters for find longest subsequences')
-    find_longest.add_argument('--min_align_length', type=int, default=200, help="Minimum alignment length [200]")
-    find_longest.add_argument("--min_unitig_length", type=int, default=1000, help="Minimum unitig length [1000]")
+    find_longest.add_argument('--min_align_length', type=int, default=1000, help="Minimum alignment length [1000]")
+    find_longest.add_argument("--min_unitig_length", type=int, default=20000, help="Deprecated v1 option; use --min_query_length")
     find_longest.add_argument('--min_alignment_distance', type=int, default=500000, help='The minimum distance between two alignments [500000]')
     find_longest.add_argument('--min_match_ratio', type=float, default=0.05, help='Minimum match ratio [0.05]')
     find_longest.add_argument('--min_lis_size', type=int, default=5, help='Minimum number of alignments in a LIS to be considered for mergeing [5]')
@@ -734,13 +645,179 @@ def parse_arguments():
     allelic_table.add_argument('--chr_num', type=int, default=12, help='The number of chromosomes [12]')
     allelic_table.add_argument('--top_n', type=int, default=4, help='The number of haplotypes, for example, tetraploid is 4 [4]')
     allelic_table.add_argument('--search_range', type=int, default=20, help='Search range [20]')
+    allelic_table.add_argument('--min_identity', type=float, default=0.90)
+    allelic_table.add_argument('--min_alignment_mapq', type=int, default=20)
+    allelic_table.add_argument('--min_query_length', type=int, default=20000)
+    allelic_table.add_argument('--min_chain_aligned_bp', type=int, default=20000)
+    allelic_table.add_argument('--min_query_coverage', type=float, default=0.30)
+    allelic_table.add_argument('--min_target_span_coverage', type=float, default=0.30)
+    allelic_table.add_argument('--min_sparse_query_span_coverage', type=float, default=0.80)
+    allelic_table.add_argument('--min_sparse_aligned_bp', type=int, default=1000000)
+    allelic_table.add_argument('--min_sparse_anchors', type=int, default=20)
+    allelic_table.add_argument('--min_sparse_mean_mapq', type=float, default=20.0)
+    allelic_table.add_argument('--min_fragmented_aligned_bp', type=int, default=500000)
+    allelic_table.add_argument('--min_fragmented_anchors', type=int, default=20)
+    allelic_table.add_argument('--min_fragmented_mean_mapq', type=float, default=20.0)
+    allelic_table.add_argument('--min_fragmented_reference_margin', type=float, default=0.20)
+    allelic_table.add_argument('--min_chain_identity', type=float, default=0.90)
+    allelic_table.add_argument('--min_reference_margin', type=float, default=0.05)
+    allelic_table.add_argument('--max_overlap', type=int, default=10000)
+    allelic_table.add_argument('--max_projection_gap', type=int, default=20000)
+    allelic_table.add_argument(
+        '--max_projection_blocks', type=int, default=10,
+        help='QC threshold for fragmented unitigs; does not reject the unitig [10]'
+    )
+    allelic_table.add_argument('--min_projection_aligned_bp', type=int, default=10000)
+    allelic_table.add_argument('--min_projection_coverage', type=float, default=0.70)
+    allelic_table.add_argument('--min_block_identity', type=float, default=0.90)
+    allelic_table.add_argument('--min_block_mapq', type=float, default=20.0)
+    allelic_table.add_argument('--min_block_collinearity', type=float, default=0.80)
+    allelic_table.add_argument('--min_anchor_block_aligned_bp', type=int, default=100000)
+    allelic_table.add_argument('--min_anchor_query_fraction', type=float, default=0.005)
+    allelic_table.add_argument('--min_segment_length', type=int, default=10000)
+    allelic_table.add_argument('--min_path_envelope_query_length', type=int, default=5000000)
+    allelic_table.add_argument('--min_path_envelope_query_coverage', type=float, default=0.25)
+    allelic_table.add_argument('--min_path_envelope_query_span_coverage', type=float, default=0.80)
+    allelic_table.add_argument('--min_path_envelope_target_coverage', type=float, default=0.20)
+    allelic_table.add_argument('--max_path_envelope_span_ratio', type=float, default=2.0)
+    allelic_table.add_argument('--min_long_path_pair_overlap', type=int, default=10000)
+    allelic_table.add_argument('--min_over_capacity_pair_overlap', type=int, default=10000)
+    allelic_table.add_argument('--min_over_capacity_pair_short_coverage', type=float, default=0.50)
+    allelic_table.add_argument('--min_deferred_over_capacity_bp', type=int, default=100000)
+    allelic_table.add_argument('--max_deferred_over_capacity_query_length', type=int, default=5000000)
+    allelic_table.add_argument('--max_deferred_over_capacity_preferred_fraction', type=float, default=0.0)
+    allelic_table.add_argument('--length_prior_scale', type=float, default=1000000.0)
+    allelic_table.add_argument('--unknown_dosage_policy', choices=['exclude', 'haplotig'], default='exclude')
+    allelic_table.add_argument('--over_capacity_policy', choices=['omit', 'confident', 'best'], default='confident')
+    allelic_table.add_argument('--min_resolution_margin', type=float, default=0.10)
+
+    chromosome_assignment = parser.add_argument_group('>>> Chromosome assignment')
+    chromosome_assignment.add_argument(
+        '--min_chromosome_margin', type=float, default=0.05,
+        help='Minimum best-vs-second chain score margin for chromosome rescue [0.05]'
+    )
 
     cluster = parser.add_argument_group('>>> Cluster based on Hi-C links')
-    cluster.add_argument('--full_links', type=str, required=True, help='Path to full links pickle')
+    cluster.add_argument('--full_links', type=str, help='Path to full links pickle')
     cluster.add_argument('--flank', type=int, help='Flank')
+    cluster.add_argument(
+        '--hic_link_normalization', choices=['dosage', 'raw'], default='dosage',
+        help=(
+            'Use dosage-normalized Hi-C counts in stages 03-05, or raw read-pair '
+            'counts [dosage]'
+        )
+    )
+    cluster.add_argument(
+        '--cluster_balance_weight', type=float, default=1.0,
+        help='Weight of normalized group-bp imbalance relative to Hi-C cohesion [1.0]'
+    )
+    cluster.add_argument(
+        '--cluster_refinement_rounds', type=int, default=10,
+        help='Maximum rounds for single-unit and Kempe-component refinement [10]'
+    )
+    cluster.add_argument('--cluster_phase_block_rounds', type=int, default=10)
+    cluster.add_argument('--cluster_min_phase_block_gain', type=float, default=0.005)
+    cluster.add_argument('--cluster_max_phase_boundary_relaxations', type=int, default=1)
+    cluster.add_argument('--cluster_max_phase_boundary_overlap', type=float, default=0.30)
+    cluster.add_argument('--cluster_max_constraint_relaxation_rounds', type=int, default=50)
+    cluster.add_argument('--cluster_min_constraint_relaxation_gain', type=float, default=0.0)
+    cluster.add_argument('--cluster_min_constraint_relaxation_links', type=float, default=5.0)
+    cluster.add_argument('--cluster_min_constraint_relaxation_margin', type=float, default=0.10)
+    cluster.add_argument('--cluster_max_constraint_relaxations_per_move', type=int, default=2)
+    cluster.add_argument('--cluster_max_constraint_relaxation_overlap', type=float, default=0.30)
+    cluster.add_argument('--cluster_max_phase_interval_rounds', type=int, default=4)
+    cluster.add_argument('--cluster_max_phase_interval_relaxations', type=int, default=2)
+    cluster.add_argument(
+        '--cluster_max_backtracks', type=int, default=1000000,
+        help='Maximum exact constraint-search backtracks [1000000]'
+    )
+    cluster.add_argument(
+        '--cluster_constraint_relaxation',
+        choices=['weakest', 'fail'],
+        default='weakest',
+        help='Resolve globally impossible allelic constraints by relaxing the weakest edge, or fail [weakest]'
+    )
+    cluster.add_argument('--cluster_protected_long_unitig_length', type=int, default=5000000)
+    cluster.add_argument('--cluster_protected_length_ratio', type=float, default=5.0)
+    cluster.add_argument('--cluster_protected_short_overlap', type=float, default=0.50)
 
     recluster = parser.add_argument_group('>>> Recluster based on Hi-C links')
-    recluster.add_argument('--clm', type=str, required=True, help='Path to clm, from parsed hi-c links bam')
+    recluster.add_argument('--clm', type=str, help='Path to clm, from parsed hi-c links bam')
+    recluster.add_argument(
+        '--recluster_min_adjusted_links', type=float, default=5.0,
+        help='Minimum Hi-C support on the selected normalization scale [5.0]'
+    )
+    recluster.add_argument(
+        '--recluster_min_group_margin', type=float, default=0.10,
+        help='Minimum weakest-selected vs strongest-unselected density margin [0.10]'
+    )
+    recluster.add_argument('--recluster_min_allelic_block_anchors', type=int, default=1)
+    recluster.add_argument(
+        '--recluster_max_allelic_block_configurations', type=int, default=256
+    )
+    recluster.add_argument(
+        '--recluster_min_assigned_fraction', type=float, default=0.0,
+        help='Optional minimum fraction of group-linked Hi-C assigned to selected groups [0.0]'
+    )
+    recluster.add_argument(
+        '--recluster_max_rounds', type=int, default=10,
+        help='Maximum high-confidence propagation rounds [10]'
+    )
+    recluster.add_argument(
+        '--recluster_refinement_rounds', type=int, default=4,
+        help='Synchronous stability checks corresponding to recluster runs 2-5 [4]'
+    )
+    recluster.add_argument(
+        '--recluster_low_confidence_policy', choices=['defer', 'best'], default='defer',
+        help='Keep ambiguous unitigs unassigned or use their best available groups [defer]'
+    )
+    recluster.add_argument(
+        '--recluster_unknown_dosage_policy', choices=['error', 'haplotig'], default='haplotig',
+        help='Handle chromosome unitigs absent from the dosage table [haplotig]'
+    )
+    recluster.add_argument(
+        '--recluster_seed_review', choices=['weak', 'off'], default='weak',
+        help='Re-evaluate weak 03.cluster seeds with chromosome Hi-C, or keep every seed fixed [weak]'
+    )
+    recluster.add_argument(
+        '--recluster_trusted_seed_bases', default='hic_supported',
+        help='Comma-separated 03.cluster assignment bases retained as immutable anchors [hic_supported]'
+    )
+    recluster.add_argument(
+        '--recluster_reviewed_seed_fallback', choices=['retain', 'defer'], default='retain',
+        help='Retain an original seed group when Hi-C review is inconclusive, or defer it [retain]'
+    )
+
+    rescue = parser.add_argument_group('>>> Rescue chromosome-unassigned unitigs')
+    rescue.add_argument(
+        '--rescue_min_adjusted_links', type=float, default=5.0,
+        help='Minimum support on the selected Hi-C normalization scale [5.0]'
+    )
+    rescue.add_argument(
+        '--rescue_min_chromosome_margin', type=float, default=0.10,
+        help='Minimum normalized best-vs-second chromosome margin [0.10]'
+    )
+    rescue.add_argument(
+        '--rescue_min_group_margin', type=float, default=0.10,
+        help='Minimum weakest-selected vs strongest-unselected group margin [0.10]'
+    )
+    rescue.add_argument(
+        '--rescue_min_assigned_fraction', type=float, default=0.0,
+        help='Optional minimum fraction of group-linked Hi-C in selected groups [0.0]'
+    )
+    rescue.add_argument(
+        '--rescue_max_rounds', type=int, default=10,
+        help='Maximum high-confidence rescue propagation rounds [10]'
+    )
+    rescue.add_argument(
+        '--rescue_low_confidence_policy', choices=['defer', 'best'], default='defer',
+        help='Keep ambiguous candidates unassigned or use best available groups [defer]'
+    )
+    rescue.add_argument(
+        '--rescue_unknown_dosage_policy',
+        choices=['defer', 'error', 'haplotig'], default='defer',
+        help='Defer unsupported dosage types, stop, or treat them as haplotigs [defer]'
+    )
 
     args = parser.parse_args()
     return args
@@ -753,99 +830,143 @@ def main():
     utils_realpath = os.path.join(script_realpath, '..', 'utils')
 
     cwd = os.getcwd()       # current working dir
+    for path_argument in (
+        'p_utg', 'mT2T', 'contig_type', 'paf', 'gfa', 'full_links', 'clm'
+    ):
+        value = getattr(args, path_argument, None)
+        if value:
+            setattr(args, path_argument, os.path.abspath(value))
+    output_root = os.path.abspath(args.output_dir)
+    stop_after = 'table' if args.table_only else args.stop_after
+    stage_order = {
+        'table': 1, 'chr_seq': 2, 'cluster': 3, 'recluster': 4, 'rescue': 5
+    }
+    if stage_order[stop_after] >= stage_order['cluster'] and not args.full_links:
+        raise SystemExit('--full_links is required when running through cluster')
+    if stage_order[stop_after] >= stage_order['recluster'] and not args.clm:
+        raise SystemExit('--clm is required when running through recluster')
 
     ### Step 1: p_utg vs mT2T
-    step1_dir = os.path.join(cwd, '02.cluster', '01.putg_vs_mT2T')
+    step1_dir = os.path.join(output_root, '01.putg_vs_mT2T')
     os.makedirs(step1_dir, exist_ok=True)
 
-    paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.paf')
-    sorted_paf_file = os.path.join(step1_dir, 'p_utg_vs_mT2T.sort.paf')
-    best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.best.paf')
-    allelic_table_file = os.path.join(step1_dir, 'allelic.ctg.table')
-    allelic_table_sorted = os.path.join(step1_dir, 'allelic.ctg.table.sort')
-    top_contigs_file = os.path.join(step1_dir, 'top_contigs_per_bin.txt')
+    paf_file = os.path.abspath(args.paf) if args.paf else os.path.join(step1_dir, 'p_utg_vs_mT2T.paf')
+    best_paf_file = os.path.join(step1_dir, 'putg_vs_mT2T.collinear.paf')
+    chain_qc_file = os.path.join(step1_dir, 'collinear_chain.qc.tsv')
+    selection_summary_file = os.path.join(step1_dir, 'chromosome_selection.summary.json')
+    allelic_table_file = os.path.join(step1_dir, 'corrected_allelic_table.txt')
 
     try:
         # Minimap2 alignment
-        if not os.path.exists(paf_file):
-            subprocess.run( ' '.join([
-                'minimap2', '-cx', 'asm5', '-t', str(args.threads), args.mT2T, args.p_utg,
-                '>', paf_file
-            ]), shell=True, check=True)
+        if not args.paf and not os.path.exists(paf_file):
+            with open(paf_file, 'w') as paf_output:
+                subprocess.run([
+                    'minimap2', '-cx', 'asm5', '-t', str(args.threads),
+                    args.mT2T, args.p_utg,
+                ], stdout=paf_output, check=True)
 
-        # Sort PAF file
-        subprocess.run(' '.join([
-            'sort', '-k1,1', '-k6,6', '-k8,8n', paf_file,
-            '>', sorted_paf_file
-        ]), shell=True, check=True)
+        subprocess.run([
+            sys.executable, os.path.join(utils_realpath, 'find_collinear_chains.py'),
+            '--paf', paf_file, '--output', best_paf_file, '--qc', chain_qc_file,
+            '--summary', selection_summary_file,
+            '--min-alignment-length', str(args.min_align_length),
+            '--min-identity', str(args.min_identity),
+            '--min-alignment-mapq', str(args.min_alignment_mapq),
+            '--min-query-length', str(args.min_query_length),
+            '--min-chain-aligned-bp', str(args.min_chain_aligned_bp),
+            '--min-query-coverage', str(args.min_query_coverage),
+            '--min-target-span-coverage', str(args.min_target_span_coverage),
+            '--min-sparse-query-span-coverage', str(args.min_sparse_query_span_coverage),
+            '--min-sparse-aligned-bp', str(args.min_sparse_aligned_bp),
+            '--min-sparse-anchors', str(args.min_sparse_anchors),
+            '--min-sparse-mean-mapq', str(args.min_sparse_mean_mapq),
+            '--min-fragmented-aligned-bp', str(args.min_fragmented_aligned_bp),
+            '--min-fragmented-anchors', str(args.min_fragmented_anchors),
+            '--min-fragmented-mean-mapq', str(args.min_fragmented_mean_mapq),
+            '--min-fragmented-reference-margin', str(args.min_fragmented_reference_margin),
+            '--min-chain-identity', str(args.min_chain_identity),
+            '--min-reference-margin', str(args.min_reference_margin),
+            '--max-overlap', str(args.max_overlap),
+            '--max-gap', str(args.max_lis_distance)
+        ], check=True)
 
-        # Find the longest subsequence
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'find_longest_subsequence.py'),
-            '--paf', sorted_paf_file,
-            '--min_alignment_distance', str(args.min_alignment_distance),
-            '--min_align_length', str(args.min_align_length),
-            '--min_unitig_length', str(args.min_unitig_length),
-            '--best_lis_output', best_paf_file,
-            '--min_match_ratio', str(args.min_match_ratio),
-            '--min_lis_size', str(args.min_lis_size),
-            '--max_lis_distance', str(args.max_lis_distance)
-        ]), shell=True, check=True)
-
-        # Generate allelic table
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'allelic_table_generate.py'),
-            '--paf_file', best_paf_file,
-            '--bin_size', str(args.bin_size),
-            '--chr_num', str(args.chr_num),
-            '--contig_type', args.contig_type,
-            '--out_top_contigs_per_bin', top_contigs_file,
-            '--out_allelic_table', allelic_table_file
-        ]), shell=True, check=True)
-
-        # Sort allelic table
-        subprocess.run(' '.join([
-            'sort', '-k1,1', '-k2,2n', allelic_table_file,
-            '>', allelic_table_sorted
-        ]), shell=True, check=True)
-
-        # Refresh allelic table
-        subprocess.run(' '.join([
-            'nohup', 'time', '-v', os.path.join(utils_realpath, 'allelic_table_refresh.py'),
-            '--wd', step1_dir,
-            '--allelic_table', allelic_table_sorted,
-            '--fasta', args.p_utg,
-            '--contig_type', args.contig_type,
-            '--top_n', str(args.top_n),
-            '--search_range', str(args.search_range)
-        ]), shell=True, check=True)
+        table_command = [
+            sys.executable, os.path.join(utils_realpath, 'allelic_table_generate_v2.py'),
+            '--paf', best_paf_file, '--contig-type', args.contig_type,
+            '--output', allelic_table_file,
+            '--projections', os.path.join(step1_dir, 'unitig_projections.tsv'),
+            '--qc', os.path.join(step1_dir, 'allelic_table.qc.tsv'),
+            '--rejected', os.path.join(step1_dir, 'rejected_projections.tsv'),
+            '--pairs', os.path.join(step1_dir, 'allelic_pairs.tsv'),
+            '--summary', os.path.join(step1_dir, 'allelic_table.summary.json'),
+            '--ploidy', str(args.top_n),
+            '--max-projection-gap', str(args.max_projection_gap),
+            '--max-projection-blocks', str(args.max_projection_blocks),
+            '--min-projection-aligned-bp', str(args.min_projection_aligned_bp),
+            '--min-projection-coverage', str(args.min_projection_coverage),
+            '--min-block-identity', str(args.min_block_identity),
+            '--min-block-mapq', str(args.min_block_mapq),
+            '--min-block-collinearity', str(args.min_block_collinearity),
+            '--min-anchor-block-aligned-bp', str(args.min_anchor_block_aligned_bp),
+            '--min-anchor-query-fraction', str(args.min_anchor_query_fraction),
+            '--min-segment-length', str(args.min_segment_length),
+            '--min-path-envelope-query-length', str(args.min_path_envelope_query_length),
+            '--min-path-envelope-query-coverage', str(args.min_path_envelope_query_coverage),
+            '--min-path-envelope-query-span-coverage', str(args.min_path_envelope_query_span_coverage),
+            '--min-path-envelope-target-coverage', str(args.min_path_envelope_target_coverage),
+            '--max-path-envelope-span-ratio', str(args.max_path_envelope_span_ratio),
+            '--min-long-path-pair-overlap', str(args.min_long_path_pair_overlap),
+            '--min-over-capacity-pair-overlap', str(args.min_over_capacity_pair_overlap),
+            '--min-over-capacity-pair-short-coverage', str(args.min_over_capacity_pair_short_coverage),
+            '--min-deferred-over-capacity-bp', str(args.min_deferred_over_capacity_bp),
+            '--max-deferred-over-capacity-query-length', str(args.max_deferred_over_capacity_query_length),
+            '--max-deferred-over-capacity-preferred-fraction', str(args.max_deferred_over_capacity_preferred_fraction),
+            '--length-prior-scale', str(args.length_prior_scale),
+            '--unknown-dosage-policy', args.unknown_dosage_policy,
+            '--over-capacity-policy', args.over_capacity_policy,
+            '--min-resolution-margin', str(args.min_resolution_margin)
+        ]
+        if args.gfa:
+            table_command.extend(['--gfa', args.gfa])
+        subprocess.run(table_command, check=True)
 
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
+
+    if stop_after == 'table':
+        print(f'PHap v2 allelic table: {allelic_table_file}')
+        return
 
     ### Step 2: Extract chromosome sequences from p_utg
-    step2_dir = os.path.join(cwd, '02.cluster', '02.chr_seq')
+    step2_dir = os.path.join(output_root, '02.chr_seq')
     os.makedirs(step2_dir, exist_ok=True)
     try:
-        cmd = ' '.join([
+        subprocess.run([
+            sys.executable,
             os.path.join(utils_realpath, 'extract_chr_from_putg.py'),
             '--p_utg', args.p_utg,
+            '--mT2T', args.mT2T,
             '--paf', best_paf_file,
+            '--chain-qc', chain_qc_file,
             '--wd', step2_dir,
-            '--chr_num', str(args.chr_num)
-        ])
-        subprocess.run(cmd, shell=True, check=True)
+            '--chr_num', str(args.chr_num),
+            '--min-chromosome-margin', str(args.min_chromosome_margin),
+        ], check=True)
 
     except subprocess.CalledProcessError as e:
         print(f"An error occurred: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if stop_after == 'chr_seq':
+        print(f'PHap v2 chromosome sequences: {step2_dir}')
+        return
+
     ### step3: Cluster based on hi-c links
-    step3_dir = os.path.join(cwd, '02.cluster', '03.cluster')
+    step3_dir = os.path.join(output_root, '03.cluster')
     os.makedirs(step3_dir, exist_ok=True)
     # 待聚类的染色体文件列表
-    file_list = glob.glob(os.path.join(step2_dir, '*putg.fa'))
+    file_list = sorted(glob.glob(os.path.join(step2_dir, '*.putg.fa')))
     print(f'Debugs: file_list {file_list}')
 
     for file in file_list:
@@ -855,47 +976,164 @@ def main():
         cluster_chr_dir = os.path.join(step3_dir, chr)
         os.makedirs(cluster_chr_dir, exist_ok=True)
         os.chdir(cluster_chr_dir)
-        cmd = f'grep {chr} {cwd}/02.cluster/01.putg_vs_mT2T/corrected_allelic_table.txt > {chr}.corrected_allelic_table.txt'
-        check_file_in_path(f'{chr}.corrected_allelic_table.txt', cmd)
-        # subprocess.run(cmd, shell=True, check=True)
         allelic_table_chr = f'{chr}.corrected_allelic_table.txt'
-        cluster(file, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
+        with open(allelic_table_file) as source, open(allelic_table_chr, 'w') as destination:
+            for row in source:
+                if row.split('\t', 1)[0] == chr:
+                    destination.write(row)
+        cluster(
+            file,
+            args.full_links,
+            args.flank,
+            args.contig_type,
+            allelic_table_chr,
+            cluster_chr_dir,
+            ploidy=args.top_n,
+            balance_weight=args.cluster_balance_weight,
+            max_refinement_rounds=args.cluster_refinement_rounds,
+            max_phase_block_rounds=args.cluster_phase_block_rounds,
+            min_phase_block_gain=args.cluster_min_phase_block_gain,
+            max_phase_boundary_relaxations=args.cluster_max_phase_boundary_relaxations,
+            max_phase_boundary_overlap=args.cluster_max_phase_boundary_overlap,
+            max_constraint_relaxation_rounds=args.cluster_max_constraint_relaxation_rounds,
+            min_constraint_relaxation_gain=args.cluster_min_constraint_relaxation_gain,
+            min_constraint_relaxation_links=args.cluster_min_constraint_relaxation_links,
+            min_constraint_relaxation_margin=args.cluster_min_constraint_relaxation_margin,
+            max_constraint_relaxations_per_move=args.cluster_max_constraint_relaxations_per_move,
+            max_constraint_relaxation_overlap=args.cluster_max_constraint_relaxation_overlap,
+            max_phase_interval_rounds=args.cluster_max_phase_interval_rounds,
+            max_phase_interval_relaxations=args.cluster_max_phase_interval_relaxations,
+            max_backtracks=args.cluster_max_backtracks,
+            constraint_relaxation=args.cluster_constraint_relaxation,
+            protected_long_unitig_length=args.cluster_protected_long_unitig_length,
+            protected_length_ratio=args.cluster_protected_length_ratio,
+            protected_short_overlap=args.cluster_protected_short_overlap,
+            hic_link_normalization=args.hic_link_normalization,
+        )
         # cluster(args.p_utg, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
     os.chdir(cwd)
 
-    ### step4: Re-cluster unclustered unitig
-    commands = []
-    step4_dir = os.path.join(cwd, '02.cluster', '04.recluster')
+    if stop_after == 'cluster':
+        print(f'PHap v2 cluster results: {step3_dir}')
+        return
+
+    ### step4: Re-cluster unclustered chromosome unitigs
+    jobs = []
+    step4_dir = os.path.join(output_root, '04.recluster')
     os.makedirs(step4_dir, exist_ok=True)
     for file in file_list:
         file_bn = os.path.basename(file)
         chr = file_bn.replace('.putg.fa', '')
         recluster_chr_dir = os.path.join(step4_dir, chr)
         os.makedirs(recluster_chr_dir, exist_ok=True)
-        # os.chdir(recluster_chr_dir)
-        cmd = (f'cd {recluster_chr_dir}; {utils_realpath}/chr_uncluster_recluster.py --fasta {file} --contig_type {args.contig_type} '
-               f'--full_links {args.full_links} --clusters_file {step3_dir}/{chr}/group.cluster.txt --clm_file {args.clm} > log_re_out 2> log_re_err')
-        commands.append(cmd)
-    run_in_parallel(commands, 12)
+        command = [
+            sys.executable,
+            os.path.join(utils_realpath, 'chr_uncluster_recluster.py'),
+            '--fasta', file,
+            '--contig-type', args.contig_type,
+            '--full-links', args.full_links,
+            '--clusters-file', os.path.join(step3_dir, chr, 'group.cluster.txt'),
+            '--allelic-table', os.path.join(
+                step3_dir, chr, f'{chr}.corrected_allelic_table.txt'
+            ),
+            '--relaxed-constraints', os.path.join(
+                step3_dir, chr, 'cluster_relaxed_constraints.tsv'
+            ),
+            '--output-dir', recluster_chr_dir,
+            '--ploidy', str(args.top_n),
+            '--hic-link-normalization', args.hic_link_normalization,
+            '--min-adjusted-links', str(args.recluster_min_adjusted_links),
+            '--min-group-margin', str(args.recluster_min_group_margin),
+            '--min-allelic-block-anchors', str(args.recluster_min_allelic_block_anchors),
+            '--max-allelic-block-configurations', str(
+                args.recluster_max_allelic_block_configurations
+            ),
+            '--min-assigned-fraction', str(args.recluster_min_assigned_fraction),
+            '--max-rounds', str(args.recluster_max_rounds),
+            '--refinement-rounds', str(args.recluster_refinement_rounds),
+            '--low-confidence-policy', args.recluster_low_confidence_policy,
+            '--unknown-dosage-policy', args.recluster_unknown_dosage_policy,
+            '--reviewed-seed-fallback', args.recluster_reviewed_seed_fallback,
+        ]
+        if args.recluster_seed_review == 'weak':
+            command.extend([
+                '--cluster-assignments',
+                os.path.join(step3_dir, chr, 'cluster_assignments.tsv'),
+                '--trusted-seed-bases', args.recluster_trusted_seed_bases,
+            ])
+        if args.flank is not None:
+            command.extend(['--flank', str(args.flank)])
+        jobs.append((
+            command,
+            os.path.join(recluster_chr_dir, 'log_re_out'),
+            os.path.join(recluster_chr_dir, 'log_re_err'),
+        ))
+    workers = max(1, min(args.threads, len(jobs)))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(run_logged_command, *job): job[0]
+            for job in jobs
+        }
+        for future in as_completed(futures):
+            future.result()
+
+    with open(os.path.join(step4_dir, 'log_clm_split_out'), 'w') as stdout, \
+            open(os.path.join(step4_dir, 'log_clm_split_err'), 'w') as stderr:
+        subprocess.run([
+            sys.executable,
+            os.path.join(utils_realpath, 'split_clm_by_groups_v2.py'),
+            '--clm', args.clm,
+            '--recluster-dir', step4_dir,
+            '--ploidy', str(args.top_n),
+        ], stdout=stdout, stderr=stderr, check=True)
     os.chdir(cwd)
 
-    ### step5: rescue: 与 mT2T 未比对的 unitigs，被拯救
-    step5_dir = os.path.join(cwd, '02.cluster', '05.rescue')
+    if stop_after == 'recluster':
+        print(f'PHap v2 recluster results: {step4_dir}')
+        return
+
+    ### step5: rescue chromosome-unassigned unitigs
+    step5_dir = os.path.join(output_root, '05.rescue')
     os.makedirs(step5_dir, exist_ok=True)
-    os.chdir(step5_dir)
-    # 生成总的 merge.group.reassignment.cluster.txt
-    recluster_cluster_file_list = glob.glob(os.path.join(step4_dir, 'chr*', 'group.reassignment.cluster.txt'))
-    merged_cluster_file = os.path.join(step5_dir, 'merge.group.reassignment.cluster.txt')
-    # 使用 cat 命令合并文件
-    cmd_cat = 'cat ' + ' '.join(recluster_cluster_file_list) + ' > ' + merged_cluster_file
-    subprocess.run(cmd_cat, shell=True, check=True)
-    # 生成总的 un_chr.fa
     file_un_chr_fasta = os.path.join(step2_dir, 'un_chr.fa')
-    # rescue
-    cmd_rescue = (f'nohup time -v {utils_realpath}/unchr_recluster.py --draft_fasta {args.p_utg} --fasta {file_un_chr_fasta} '
-                 f'--contig_type {args.contig_type} --full_links {args.full_links} --clusters_file {merged_cluster_file} --clm_file {args.clm} '
-                 f'> log_rescue_out 2> log_rescue_err')
-    subprocess.run(cmd_rescue, shell=True, check=True)
+    rescue_command = [
+        sys.executable,
+        os.path.join(utils_realpath, 'unchr_recluster.py'),
+        '--assembly-fasta', args.p_utg,
+        '--candidate-fasta', file_un_chr_fasta,
+        '--contig-type', args.contig_type,
+        '--full-links', args.full_links,
+        '--recluster-dir', step4_dir,
+        '--output-dir', step5_dir,
+        '--ploidy', str(args.top_n),
+        '--hic-link-normalization', args.hic_link_normalization,
+        '--min-adjusted-links', str(args.rescue_min_adjusted_links),
+        '--min-chromosome-margin', str(args.rescue_min_chromosome_margin),
+        '--min-group-margin', str(args.rescue_min_group_margin),
+        '--min-assigned-fraction', str(args.rescue_min_assigned_fraction),
+        '--max-rounds', str(args.rescue_max_rounds),
+        '--low-confidence-policy', args.rescue_low_confidence_policy,
+        '--unknown-dosage-policy', args.rescue_unknown_dosage_policy,
+    ]
+    if args.flank is not None:
+        rescue_command.extend(['--flank', str(args.flank)])
+    run_logged_command(
+        rescue_command,
+        os.path.join(step5_dir, 'log_rescue_out'),
+        os.path.join(step5_dir, 'log_rescue_err'),
+    )
+
+    with open(os.path.join(step5_dir, 'log_clm_split_out'), 'w') as stdout, \
+            open(os.path.join(step5_dir, 'log_clm_split_err'), 'w') as stderr:
+        subprocess.run([
+            sys.executable,
+            os.path.join(utils_realpath, 'split_clm_by_groups_v2.py'),
+            '--clm', args.clm,
+            '--clusters-file', os.path.join(step5_dir, 'group.reassignment.cluster.txt'),
+            '--output-dir', step5_dir,
+            '--ploidy', str(args.top_n),
+        ], stdout=stdout, stderr=stderr, check=True)
+    os.chdir(cwd)
 
 
 if __name__ == '__main__':

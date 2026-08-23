@@ -4,7 +4,8 @@
 3. Hi-C: `potato4.hic_1.fq.gz`, `potato4.hic_2.fq.gz`
 ## 1. Initial assembly
 ```shell
-hifiasm -o potato4.hifi.ont.asm -t64 --ul /home/pxxiao/project/10_potato_poly/02_asm/01_test/01_hifi_ont/00_data/potato4.nanopore.fastq.gz /home/pxxiao/project/10_potato_poly/02_asm/01_test/01_hifi_ont/00_data/potato4.hifi.fastq.gz
+hifiasm -o potato4.hifi.ont.asm -t64 \
+  --ul potato4.nanopore.fastq.gz potato4.hifi.fastq.gz
 
 # Two main files are obtained for downstream analysis: primary contig assembly (p_ctg) and phased unitig assembly (p_utg)
 ```
@@ -73,24 +74,83 @@ phap cluster \
 * Based on the haplotype clustering results, raw sequencing reads, including HiFi, ONT ultra-long, and Hi-C reads, are phased into haplotype-specific read sets.
 * Each haplotype-specific read set is then used to perform de novo genome assembly by using hifiasm parallelly, followed by scaffolding with Hi-C data by using HapHiC to obtain haplotype-resolved chromosome-level assemblies.
 1. Mapping the raw sequencing reads (HiFi, ONT ultra-long, and Hi-C) to *p_utg* to get the bam file
-2. `phap phase_reads` performs phasing, de novo assembly, and scaffolding
+2. `phap phase_reads` performs auditable read assignment, de novo assembly, and scaffolding.
+   First stop after extraction and review `01.assignments/assignment_summary.json`
+   plus `02.reads/extraction_summary.json`. Parental information is not used by
+   the assignment method.
 ```shell
 wd=`pwd`
 
-phap phase_reads phase_reads \
+phap phase_reads \
         --bam_hifi $wd/HiFi.clean.bam \
         --bam_hic $wd/HiC.sort.bam \
         --bam_ont $wd/ont.putg.sort.bam \
         --contig_type $wd/contig_depth.txt \
+        --group $wd/02.cluster.v2/05.rescue/group.reassignment.cluster.txt \
         --hifi $wd/potato4.hifi.fastq.gz \
         --ont $wd/potato4.nanopore.fastq.gz \
         --hic1 $wd/potato4.hic_1.fq.gz \
-        --hic2 $wd/potato4.hic_1.fq.gz \
-        --threads 10 \
-        --process 12 \
+        --hic2 $wd/potato4.hic_2.fq.gz \
+        --output-dir $wd/03.phase_reads \
+        --stop-after extract \
+        --collapsed-policy balanced \
+        --progress-every 1000000 \
+        --threads-per-job 10 \
+        --jobs 4 \
         --seed 100 \
         > log_phase_out 2> log_phase_err &
 ```
+
+After reviewing assignment and extraction QC, rerun the same command, replace
+`--stop-after extract` with `--stop-after scaffold`, and add:
+
+```shell
+        --resume --stop-after scaffold
+```
+
+Tool executables are resolved from `PATH`. Use `--hifiasm`, `--bwa`,
+`--samtools`, `--samblaster`, `--filter-bam`, or `--haphic` to provide an
+explicit executable path when needed. `--jobs * --threads-per-job` is the
+maximum requested group-level CPU concurrency; avoid nested oversubscription.
+
+For large runs, `--temp-dir /path/to/phap_tmp` confines PHap, SQLite, and
+child-tool temporary files to that directory. Input BAM/FASTQ files are opened
+read-only and are never rewritten; final results remain under `--output-dir`.
+
+Progress is written to stderr and `$wd/03.phase_reads/phase_reads.log`.
+`--resume` uses BAM-offset checkpoints while the current sequencing type is
+being read, sequencing-type checkpoints during assignment/extraction, and
+per-group checkpoints during assembly/scaffolding.
+
+To deliberately rerun assembly and everything after it while retaining read
+assignment and extraction, use:
+
+```shell
+        --resume --rerun-from assemble --stop-after scaffold
+```
+
+For a chromosome-scale trial, add for example:
+
+```shell
+        --chromosomes chr01 chr02
+```
+
+If only one BAM is ready, assignment can be tested independently. For example:
+
+```shell
+phap phase_reads \
+        --bam-hifi HiFi.p_utg.sort.bam \
+        --data-types hifi \
+        --contig-type contig_depth.txt \
+        --group 02.cluster.v2/05.rescue/group.reassignment.cluster.txt \
+        --chromosomes chr01 \
+        --output-dir 03.phase_reads.hifi_chr01_test \
+        --stop-after assign
+```
+
+For one output group, use `--groups chr01_group1`. The other chr01 haplotypes
+still participate internally in read assignment and collapsed-read balancing;
+only `chr01_group1` is extracted, assembled, and scaffolded.
 
 ## 7. Manual correction by Juicebox
 * Juicebox was employed to correct scaffolding errors based on the Hi-C interaction signal map.

@@ -16,8 +16,8 @@ import sys
 # __version__ = "1.0.0"
 # __update_time__ = "2024-08-08"
 
-__version__ = "1.1.0"
-__update_time__ = "2025-04-22"
+__version__ = "2.0.0"
+__update_time__ = "2026-08-19"
 
 
 HELP_DOC = """
@@ -25,6 +25,10 @@ HELP_DOC = """
   
   Command       Description
   --------      ------------------------------------------------------------------------
+  allelic_table Build a high-confidence allelic unitig table using true collinear PAF
+                chains, interval overlap, and dosage constraints. This command can reuse
+                an existing raw PAF and does not run Hi-C clustering.
+
   mt2t          Generate a mosaic telomere-to-telomere genome using the p_ctg genome as
                 the reference. This is used for creating an allelic contig table to solve
                 the allelic conflict problem.
@@ -87,6 +91,7 @@ def main():
 
     # Map each function to its corresponding script
     params = {
+        'allelic_table': 'phap_allelic_table.py',
         'mt2t': 'phap_mT2T.py',
         'cluster': 'phap_cluster.py',
         'phase_reads': 'phap_phase_reads.py',

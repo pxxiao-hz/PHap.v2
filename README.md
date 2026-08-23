@@ -1,5 +1,76 @@
-# PHap
+# PHap v2
+
+> [!WARNING]
+> This branch is a **testing release**, not a stable production release.
+> Synthetic tests pass, but real-data validation of the complete
+> `phase_reads -> assembly -> scaffolding` workflow is still in progress.
+> It is published so that collaborators can evaluate other species and report
+> failures, parameter sensitivity, and ploidy-specific behavior. Do not replace
+> an established production workflow without validating all QC outputs.
+
 A haplotype-resolved and telomere-to-telomere genome assembly pipeline (PHap) tailored for autopolyploids, relying solely on common sequencing data including long-reads and Hi-C.
+
+PHap v2 adds an auditable allelic-unitig-table workflow. It assigns each unitig
+from aggregate chromosome-local PAF evidence, retains rearranged and mixed-
+strand segments, uses real reference-coordinate overlap and dosage constraints,
+and reports ambiguity explicitly. Parental information is never used for
+clustering or read assignment; it may only be used after a run for evaluation.
+
+See [MULTISPECIES_TESTING.md](MULTISPECIES_TESTING.md) before testing another
+species. It records the current validation boundary, required metadata, a
+small-scale testing strategy, and the files needed for a useful bug report.
+
+See [UPGRADE_RECORD.md](UPGRADE_RECORD.md) for the consolidated Chinese record
+of code changes, retained and rejected algorithm experiments, current validation
+results, and the recommended next run.
+
+See [ALLELIC_TABLE_V2.md](ALLELIC_TABLE_V2.md) for the algorithm, thresholds,
+output interpretation, and validation strategy.
+
+See [CHROMOSOME_EXTRACTION_V2.md](CHROMOSOME_EXTRACTION_V2.md) for the rewritten
+`02.chr_seq` assignment rules, consistency checks, and QC outputs.
+
+See [CLUSTER_V2.md](CLUSTER_V2.md) for the rewritten `03.cluster` constraint
+solver, dosage handling, Hi-C refinement, and acceptance checks.
+
+See [RECLUSTER_V2.md](RECLUSTER_V2.md) for the rewritten `04.recluster`
+confidence rules, iterative propagation, deferred-sequence handling, and
+single-pass CLM splitting.
+
+See [RESCUE_V2.md](RESCUE_V2.md) for the rewritten `05.rescue` candidate
+scope, chromosome-and-group confidence rules, final partition validation, and
+auditable outputs.
+
+See [PHASE_READS_V2.md](PHASE_READS_V2.md) for the staged read-assignment,
+collapsed-read balancing, one-pass FASTQ extraction, assembly, and scaffolding
+workflow. Variant-based read phasing is a documented later extension.
+
+## PHap v2 quick start
+
+Reuse an existing raw minimap2 PAF:
+
+```shell
+python PHap.py allelic_table \
+  --p_utg p_utg.fa \
+  --mT2T mT2T.fa \
+  --contig_type contig_depth.txt \
+  --paf p_utg_vs_mT2T.paf \
+  --output-dir 02.cluster.v2/01.putg_vs_mT2T
+```
+
+Omit `--paf` to run minimap2. The primary result is
+`corrected_allelic_table.txt`; review `collinear_chain.qc.tsv`,
+`allelic_table.qc.tsv`, `rejected_projections.tsv`, and
+`allelic_table.summary.json` before clustering. GFA is optional and is not used
+unless `--gfa` is supplied. With `--gfa`, PHap also removes
+direct graph-link conflicts and writes `allelic_pairs.gfa_validation.tsv` plus
+its JSON summary. The no-sequence hifiasm GFA is sufficient for this check.
+
+Run the complete workflow only through initial clustering with:
+
+```shell
+python PHap.py cluster ... --stop_after cluster
+```
 ## Overview
 ![|600](https://bioin-1320274504.cos.ap-nanjing.myqcloud.com/images/PHAP.overview.v3.png)
 1. **Initial assembly.** A primary contig assembly (*p_ctg*) and a phased unitig assembly (*p_utg*) are assembled using hifiasm with the long-read sequencing data including PacBio HiFi and Oxford Nanopore Ultra-Long sequencings. 
@@ -27,10 +98,12 @@ A haplotype-resolved and telomere-to-telomere genome assembly pipeline (PHap) ta
 	* [Python 3.9.7](https://www.python.org/downloads/)
 
 ## Installation
-* Download PHap
+* Download the current multispecies testing branch
 ```shell
-$ git clone git@github.com:JiaoLab2021/PHap.git
-$ cd /path/to/PHap/
+$ git clone --branch testing/v2-multispecies-20260823 \
+    https://github.com/pxxiao-hz/PHap.v2.git
+$ cd /path/to/PHap.v2/
+$ python -m pip install -r requirements.txt
 $ chmod +x PHap.py
 ```
 
@@ -73,6 +146,17 @@ usage: Haplotype assembly and scaffolding of autopolyploid genome.
 ## The pipeline for assembling a tetraploid potato genome
 Please check the [Pipeline](Pipeline.md).
 
+The upgraded read-assignment, reassembly, and scaffolding design is documented
+in [PHASE_READS_V2.md](PHASE_READS_V2.md).
+
 ## Note
-**PHap** is currently developed to do _haplotype-resolved telomere-to-telomere (T2T) genome assembly_ in **autotetraploid genomes**, with a primary focus on crops such as potato (_Solanum tuberosum_). 
-Theoretically, **PHap can be easily extended to support other polyploid genome types**, including **triploid**, **hexaploid**, and more complex genomes.
+**PHap** is currently developed and tested for _haplotype-resolved
+telomere-to-telomere (T2T) genome assembly_ in **autotetraploid genomes**, with
+a primary focus on potato (_Solanum tuberosum_). General ploidy support is a
+planned upgrade; the current workflow should not be assumed to support
+triploid, hexaploid, or other ploidies without validation and code changes.
+
+`--top_n` and `--chr_num` make basic species configuration possible, but they
+do not by themselves prove that every downstream algorithm is ploidy-generic.
+Testing other species is encouraged on this branch, with results reported as
+described in [MULTISPECIES_TESTING.md](MULTISPECIES_TESTING.md).

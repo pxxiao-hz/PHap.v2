@@ -41,12 +41,19 @@ genome="$1"
 hic1="$2"
 hic2="$3"
 
-# haphic env
-source /home/pxxiao/tools/Anaconda3/bin/activate haphic
+# Required executables must be available on PATH. FILTER_BAM may be used to
+# provide an explicit path to HapHiC's filter_bam utility.
+filter_bam_command="${FILTER_BAM:-filter_bam}"
+for command in bwa samblaster samtools "$filter_bam_command"; do
+    if ! command -v "$command" >/dev/null 2>&1; then
+        echo "Error: required executable not found: $command" >&2
+        exit 1
+    fi
+done
 
 # Index the reference genome
 bwa index "$genome"
 
 # Perform read alignment and processing
 bwa mem -5SP -t "$num_threads" "$genome" "$hic1" "$hic2" | samblaster | samtools view - -@ "$num_threads" -S -h -b -F 3340 -o HiC.bam
-~/tools/Assembly-tools/73_HapHiC/HapHiC/utils/filter_bam HiC.bam 1 --nm 3 --threads "$num_threads" | samtools view - -b -@ "$num_threads" -o HiC.filtered.bam
+"$filter_bam_command" HiC.bam 1 --nm 3 --threads "$num_threads" | samtools view - -b -@ "$num_threads" -o HiC.filtered.bam
