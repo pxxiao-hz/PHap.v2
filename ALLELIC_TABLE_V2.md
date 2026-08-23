@@ -2,11 +2,11 @@
 
 ## Goal
 
-The allelic table is treated as a set of high-confidence mutual-exclusion
-constraints, not as a way to force every unitig into a row. An uncertain
-projection is rejected and reported. This deliberately trades some recall for
-precision because a false allelic edge can corrupt all downstream haplotype
-groups.
+The allelic table records mutual-exclusion candidates, not a way to force every
+unitig into a row. Direct accepted projection blocks and inferred long-path
+envelopes are retained as distinct evidence classes in `allelic_pairs.tsv`.
+This distinction matters because a false hard allelic edge can corrupt all
+downstream haplotype groups.
 
 ## Algorithm
 
@@ -39,6 +39,10 @@ groups.
    only if the best dosage-valid solution exceeds the second-best solution by
    the configured confidence margin. Otherwise omit the interval.
 8. Merge adjacent intervals only when their selected unitig set is identical.
+9. For every emitted pair, separately calculate the union-aware overlap of its
+   accepted projection blocks. A large table overlap can therefore be
+   identified as `envelope_only` or `boundary_touch` instead of being mistaken
+   for direct same-locus evidence.
 
 Hi-C is intentionally not used to create the table. It remains independent
 evidence for clustering and validation, avoiding circular inference.
@@ -68,7 +72,7 @@ evidence for clustering and validation, avoiding circular inference.
 For a stricter precision run, start with:
 
 ```shell
-python PHap.py allelic_table \
+python PHap.v2/PHap.py allelic_table \
   --p_utg p_utg.fa --mT2T mT2T.fa --contig_type contig_depth.txt \
   --paf p_utg_vs_mT2T.paf \
   --min-alignment-mapq 30 \
@@ -93,7 +97,7 @@ sequence projection alone.
 | `unitig_projections.tsv` | Localized block-level query/target coverage, contribution, identity, MAPQ, strand, collinearity, class, and confidence |
 | `allelic_table.qc.tsv` | Every atomic interval, dosage, decision, and margin |
 | `rejected_projections.tsv` | Projection rejection reason and detail |
-| `allelic_pairs.tsv` | Pair overlap bp and directional overlap ratios |
+| `allelic_pairs.tsv` | Table overlap plus direct-projection overlap, query-length ratios, and evidence class |
 | `allelic_pairs.gfa_validation.tsv` | Per-pair graph topology and read-assignment evidence |
 | `allelic_pairs.gfa_validation.summary.json` | Counts for each GFA evidence class |
 | `allelic_table.summary.json` | Counts and table-generation parameters |

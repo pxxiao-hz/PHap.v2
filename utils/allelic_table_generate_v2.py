@@ -95,6 +95,24 @@ def interval_length(intervals) -> int:
     return sum(end - start for start, end in intervals)
 
 
+def intersection_length(intervals1, intervals2) -> int:
+    """Return union-aware overlap between two interval collections."""
+    left = union_intervals(intervals1)
+    right = union_intervals(intervals2)
+    left_index = 0
+    right_index = 0
+    overlap_bp = 0
+    while left_index < len(left) and right_index < len(right):
+        start = max(left[left_index][0], right[right_index][0])
+        end = min(left[left_index][1], right[right_index][1])
+        overlap_bp += max(0, end - start)
+        if left[left_index][1] < right[right_index][1]:
+            left_index += 1
+        else:
+            right_index += 1
+    return overlap_bp
+
+
 def parse_contig_types(path: Path):
     contig_types = {}
     with path.open() as handle:
@@ -1040,6 +1058,20 @@ def write_outputs(
             unitig_bp[(segment.target, unitig)] += length
         for left, right in combinations(segment.unitigs, 2):
             pair_bp[(segment.target, left, right)] += length
+
+    # A path envelope is useful for recovering divergent long paths, but it is
+    # inferred across gaps without accepted alignments.  Preserve the overlap
+    # between accepted alignment blocks separately so downstream clustering can
+    # distinguish direct same-locus evidence from envelope-only evidence.
+    direct_intervals = defaultdict(list)
+    query_lengths = {}
+    for projection in projections:
+        query_lengths[projection.unitig] = projection.query_length
+        if projection.constraint_role != "path_envelope":
+            direct_intervals[(projection.target, projection.unitig)].append(
+                (projection.start, projection.end)
+            )
+
     with args.pairs.open("w", newline="") as handle:
         writer = csv.writer(handle, delimiter="\t")
         writer.writerow(
@@ -1052,11 +1084,21 @@ def write_outputs(
                 "unitig2_table_bp",
                 "ratio1",
                 "ratio2",
+                "direct_projection_overlap_bp",
+                "direct_query_ratio1",
+                "direct_query_ratio2",
+                "evidence_class",
             ]
         )
         for (target, left, right), overlap_bp in sorted(pair_bp.items()):
             left_bp = unitig_bp[(target, left)]
             right_bp = unitig_bp[(target, right)]
+            direct_overlap_bp = intersection_length(
+                direct_intervals[(target, left)],
+                direct_intervals[(target, right)],
+            )
+            left_length = query_lengths[left]
+            right_length = query_lengths[right]
             writer.writerow(
                 [
                     target,
@@ -1067,6 +1109,16 @@ def write_outputs(
                     right_bp,
                     overlap_bp / left_bp,
                     overlap_bp / right_bp,
+                    direct_overlap_bp,
+                    direct_overlap_bp / left_length if left_length else 0.0,
+                    direct_overlap_bp / right_length if right_length else 0.0,
+                    (
+                        "direct_projection"
+                        if direct_overlap_bp >= args.min_segment_length
+                        else "boundary_touch"
+                        if direct_overlap_bp
+                        else "envelope_only"
+                    ),
                 ]
             )
 

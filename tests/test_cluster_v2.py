@@ -53,10 +53,12 @@ class ConstraintClusterTests(unittest.TestCase):
         check=True,
         extra_args=None,
         lengths=None,
+        pair_evidence=None,
     ):
         fasta = work / "chr1.fa"
         contig_types = work / "types.tsv"
         allelic_table = work / "table.tsv"
+        allelic_pairs = work / "pairs.tsv"
         full_links = work / "links.pkl"
         output = work / "cluster"
         lengths = lengths or {name: 100 for name in names}
@@ -89,6 +91,9 @@ class ConstraintClusterTests(unittest.TestCase):
                 "--output-dir",
                 str(output),
             ]
+        if pair_evidence is not None:
+            allelic_pairs.write_text(pair_evidence)
+            command.extend(["--allelic-pairs", str(allelic_pairs)])
         if extra_args:
             command.extend(extra_args)
         result = subprocess.run(
@@ -264,6 +269,58 @@ class ConstraintClusterTests(unittest.TestCase):
                 protected = list(csv.DictReader(handle, delimiter="\t"))
             self.assertEqual(len(protected), 4)
             self.assertTrue(all(row["long_unitig"] == "LONG" for row in protected))
+
+    def test_protects_substantial_direct_projection_edge_during_relaxation(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            work = Path(temporary_directory)
+            names = ["A", "B", "C", "D", "E"]
+            types = {name: "haplotig" for name in names}
+            table = "".join(
+                f"chr1\t{index * 100}\t{index * 100 + 100}\t{left}\t{right}\n"
+                for index, (left, right) in enumerate(
+                    itertools.combinations(names, 2)
+                )
+            )
+            pair_evidence = (
+                "target\tunitig1\tunitig2\tdirect_projection_overlap_bp\n"
+                "chr1\tA\tB\t300\n"
+            )
+            output, result = self.run_cluster(
+                work,
+                names,
+                types,
+                table,
+                {},
+                lengths={name: 1000 for name in names},
+                pair_evidence=pair_evidence,
+                extra_args=[
+                    "--protected-direct-overlap-bp",
+                    "200",
+                    "--protected-direct-short-overlap",
+                    "0.2",
+                ],
+            )
+
+            self.assertEqual(result.returncode, 0)
+            with (output / "cluster_relaxed_constraints.tsv").open() as handle:
+                relaxed = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertNotIn(
+                frozenset(("A", "B")),
+                {
+                    frozenset((row["unitig1"], row["unitig2"]))
+                    for row in relaxed
+                },
+            )
+            with (output / "cluster_protected_constraints.tsv").open() as handle:
+                protected = list(csv.DictReader(handle, delimiter="\t"))
+            direct = [
+                row
+                for row in protected
+                if {row["unitig1"], row["unitig2"]} == {"A", "B"}
+            ]
+            self.assertEqual(len(direct), 1)
+            self.assertEqual(direct[0]["protection_reason"], "direct_projection")
+            self.assertEqual(direct[0]["direct_projection_overlap_bp"], "300")
 
     def test_strict_mode_rejects_globally_infeasible_constraints(self):
         with tempfile.TemporaryDirectory() as temporary_directory:

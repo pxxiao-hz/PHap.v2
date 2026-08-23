@@ -185,6 +185,55 @@ def parse_allelic_table(path: Path, contig_types, ploidy: int):
     )
 
 
+def parse_allelic_pair_evidence(path: Optional[Path], chromosome, table_units):
+    """Read direct-projection support for table edges.
+
+    The allelic table can contain constraints inferred from a long-path envelope.
+    This sidecar preserves which pairs also overlap in accepted alignment blocks.
+    """
+    evidence = {}
+    if path is None:
+        return evidence
+    required = {
+        "target",
+        "unitig1",
+        "unitig2",
+        "direct_projection_overlap_bp",
+    }
+    with path.open(newline="") as handle:
+        reader = csv.DictReader(handle, delimiter="\t")
+        missing = required - set(reader.fieldnames or ())
+        if missing:
+            raise ValueError(
+                f"Allelic-pair evidence is missing columns: {', '.join(sorted(missing))}"
+            )
+        for line_number, row in enumerate(reader, 2):
+            if row["target"] != chromosome:
+                continue
+            unitig1 = row["unitig1"]
+            unitig2 = row["unitig2"]
+            if unitig1 not in table_units or unitig2 not in table_units:
+                continue
+            edge = tuple(sorted((unitig1, unitig2)))
+            if edge in evidence:
+                raise ValueError(
+                    f"Duplicate allelic-pair evidence for {edge[0]},{edge[1]} "
+                    f"at {path}:{line_number}"
+                )
+            try:
+                direct_overlap_bp = int(row["direct_projection_overlap_bp"])
+            except ValueError as exc:
+                raise ValueError(
+                    f"Invalid direct projection overlap at {path}:{line_number}"
+                ) from exc
+            if direct_overlap_bp < 0:
+                raise ValueError(
+                    f"Negative direct projection overlap at {path}:{line_number}"
+                )
+            evidence[edge] = direct_overlap_bp
+    return evidence
+
+
 def find_overcapacity_cliques(adjacency, dosage, ploidy):
     cliques = []
 
@@ -248,7 +297,7 @@ def prepare_enforced_constraints(
         if not relaxable_edges:
             raise ValueError(
                 "Allelic constraints are not satisfiable without removing a protected "
-                "long-unitig containment edge"
+                "high-confidence allelic edge"
             )
 
         edge = min(
@@ -306,7 +355,7 @@ def relax_weakest_component_edge(
     if not candidate_edges:
         raise ValueError(
             "Constraint component cannot be solved without removing a protected "
-            "long-unitig containment edge"
+            "high-confidence allelic edge"
         )
     edge = min(
         candidate_edges,
@@ -354,6 +403,27 @@ def find_protected_long_unitig_edges(
             overlap_fraction = edge_overlap_bp[edge] / short_length
             if overlap_fraction >= min_short_overlap:
                 protected.add(edge)
+    return protected
+
+
+def find_protected_direct_projection_edges(
+    adjacency,
+    lengths,
+    direct_projection_overlap_bp,
+    min_overlap_bp,
+    min_short_overlap,
+):
+    """Protect substantial conflicts supported by accepted alignment blocks."""
+    protected = set()
+    for edge, overlap_bp in direct_projection_overlap_bp.items():
+        unitig1, unitig2 = edge
+        if unitig2 not in adjacency.get(unitig1, ()):
+            continue
+        short_length = min(lengths[unitig1], lengths[unitig2])
+        if short_length <= 0 or overlap_bp < min_overlap_bp:
+            continue
+        if overlap_bp / short_length >= min_short_overlap:
+            protected.add(edge)
     return protected
 
 
@@ -1568,6 +1638,8 @@ def write_outputs(
     row_counts,
     relaxed_constraints,
     protected_edges,
+    protected_edge_reasons,
+    direct_projection_overlap_bp,
     assignments,
     links,
     link_neighbors,
@@ -1728,12 +1800,15 @@ def write_outputs(
             fields = [
                 "unitig1",
                 "unitig2",
+                "protection_reason",
                 "long_unitig",
                 "short_unitig",
                 "long_length",
                 "short_length",
                 "overlap_bp",
                 "short_overlap_fraction",
+                "direct_projection_overlap_bp",
+                "direct_projection_short_fraction",
             ]
             writer = csv.DictWriter(
                 handle, fieldnames=fields, delimiter="\t", lineterminator="\n"
@@ -1754,16 +1829,26 @@ def write_outputs(
                 long_length = sequences[long_unitig]["length"]
                 short_length = sequences[short_unitig]["length"]
                 overlap_bp = protected_overlap[(unitig1, unitig2)]
+                direct_overlap_bp = direct_projection_overlap_bp.get(
+                    (unitig1, unitig2), 0
+                )
                 writer.writerow(
                     {
                         "unitig1": unitig1,
                         "unitig2": unitig2,
+                        "protection_reason": ",".join(
+                            sorted(protected_edge_reasons[(unitig1, unitig2)])
+                        ),
                         "long_unitig": long_unitig,
                         "short_unitig": short_unitig,
                         "long_length": long_length,
                         "short_length": short_length,
                         "overlap_bp": overlap_bp,
                         "short_overlap_fraction": f"{overlap_bp / short_length:.6f}",
+                        "direct_projection_overlap_bp": direct_overlap_bp,
+                        "direct_projection_short_fraction": (
+                            f"{direct_overlap_bp / short_length:.6f}"
+                        ),
                     }
                 )
 
@@ -1897,6 +1982,9 @@ def write_outputs(
                 "full_links": str(args.full_links.resolve()),
                 "contig_type": str(args.contig_type.resolve()),
                 "allelic_table": str(args.allelic_table.resolve()),
+                "allelic_pairs": (
+                    str(args.allelic_pairs.resolve()) if args.allelic_pairs else None
+                ),
             },
             "parameters": {
                 "ploidy": args.ploidy,
@@ -1921,6 +2009,8 @@ def write_outputs(
                 "protected_long_unitig_length": args.protected_long_unitig_length,
                 "protected_length_ratio": args.protected_length_ratio,
                 "protected_short_overlap": args.protected_short_overlap,
+                "protected_direct_overlap_bp": args.protected_direct_overlap_bp,
+                "protected_direct_short_overlap": args.protected_direct_short_overlap,
             },
             "table": {
                 "rows": len(clusterer.rows),
@@ -1929,6 +2019,10 @@ def write_outputs(
                 "enforced_conflict_pairs": sum(len(value) for value in enforced_adjacency.values()) // 2,
                 "relaxed_conflict_pairs": len(relaxed_constraints),
                 "protected_conflict_pairs": len(protected_edges),
+                "protected_direct_projection_pairs": sum(
+                    "direct_projection" in reasons
+                    for reasons in protected_edge_reasons.values()
+                ),
             },
             "hic": {
                 "raw_link_records": raw_link_records,
@@ -2070,6 +2164,12 @@ def run(args):
         raise ValueError("--protected-length-ratio must be at least one")
     if not 0 <= args.protected_short_overlap <= 1:
         raise ValueError("--protected-short-overlap must be between zero and one")
+    if args.protected_direct_overlap_bp < 0:
+        raise ValueError("--protected-direct-overlap-bp must be non-negative")
+    if not 0 <= args.protected_direct_short_overlap <= 1:
+        raise ValueError(
+            "--protected-direct-short-overlap must be between zero and one"
+        )
     output_directory = args.output_dir.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -2092,7 +2192,10 @@ def run(args):
         )
     dosage = {unitig: DOSAGE_BY_TYPE[contig_types[unitig]] for unitig in table_units}
     lengths = {unitig: sequences[unitig]["length"] for unitig in table_units}
-    protected_edges = find_protected_long_unitig_edges(
+    direct_projection_overlap_bp = parse_allelic_pair_evidence(
+        args.allelic_pairs, chromosome, table_units
+    )
+    protected_long_edges = find_protected_long_unitig_edges(
         original_adjacency,
         lengths,
         edge_overlap_bp,
@@ -2100,6 +2203,19 @@ def run(args):
         args.protected_length_ratio,
         args.protected_short_overlap,
     )
+    protected_direct_edges = find_protected_direct_projection_edges(
+        original_adjacency,
+        lengths,
+        direct_projection_overlap_bp,
+        args.protected_direct_overlap_bp,
+        args.protected_direct_short_overlap,
+    )
+    protected_edges = protected_long_edges | protected_direct_edges
+    protected_edge_reasons = defaultdict(set)
+    for edge in protected_long_edges:
+        protected_edge_reasons[edge].add("long_unitig_containment")
+    for edge in protected_direct_edges:
+        protected_edge_reasons[edge].add("direct_projection")
     adjacency, relaxed_constraints = prepare_enforced_constraints(
         original_adjacency,
         dosage,
@@ -2218,6 +2334,8 @@ def run(args):
         row_counts,
         relaxed_constraints,
         protected_edges,
+        protected_edge_reasons,
+        direct_projection_overlap_bp,
         assignments,
         links,
         link_neighbors,
@@ -2258,6 +2376,14 @@ def parse_arguments():
     )
     parser.add_argument("--contig-type", required=True, type=Path)
     parser.add_argument("--allelic-table", required=True, type=Path)
+    parser.add_argument(
+        "--allelic-pairs",
+        type=Path,
+        help=(
+            "allelic_pairs.tsv sidecar containing direct-projection evidence; "
+            "enables protection of high-confidence same-locus edges"
+        ),
+    )
     parser.add_argument("--output-dir", required=True, type=Path)
     parser.add_argument("--ploidy", type=int, default=4)
     parser.add_argument("--flank", type=int)
@@ -2279,6 +2405,10 @@ def parse_arguments():
     parser.add_argument("--protected-long-unitig-length", type=int, default=5000000)
     parser.add_argument("--protected-length-ratio", type=float, default=5.0)
     parser.add_argument("--protected-short-overlap", type=float, default=0.50)
+    parser.add_argument("--protected-direct-overlap-bp", type=int, default=1_000_000)
+    parser.add_argument(
+        "--protected-direct-short-overlap", type=float, default=0.20
+    )
     parser.add_argument(
         "--constraint-relaxation",
         choices=["weakest", "fail"],

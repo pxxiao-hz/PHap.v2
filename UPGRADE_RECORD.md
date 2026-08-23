@@ -326,3 +326,14 @@ reads 深度均衡，不代表当前最新版聚类算法的最终生物学结�
   CV为2.569%，最大/最小为1.0527。group1/2及group3/4内部几乎完全一致，
   剩余组间差异由不同 collapsed candidate sets 的可分配范围约束；
 - 7个 defer 均为 `ambiguous_unique_group_evidence`，没有发生强制猜测。
+
+## 12. 直接投影证据保护（2026-08-24）
+
+长路径包络可以跨越没有 accepted alignment 的参考缺口，因此“table overlap
+很长”不等于“两个 unitig 在该区间都有直接比对”。`allelic_pairs.tsv`现在额外
+记录 accepted projection blocks 的真实交集、相对 query 长度的覆盖率及证据
+类别。03.cluster 默认保护直接交集至少1 Mb、且覆盖较短unitig至少20%的边；
+这些边不能被全局过倍性clique、Hi-C矛盾边释放、phase block或phase interval
+优化解除。仅有包络证据的边仍可在不可满足图中按弱度放松。
+
+该规则不使用亲本信息。亲本yak仍只用于算法固定后的效果评估。

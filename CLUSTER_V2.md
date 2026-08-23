@@ -17,7 +17,10 @@ group. A unitig is not discarded because it has weak or absent Hi-C links.
 4. Detect conflict cliques whose summed dosage exceeds ploidy. In the default
    `weakest` mode, remove only the least-supported edge in each impossible
    clique, ranked first by the smaller directional table-overlap ratio and then
-   by overlap bp. Record every removed edge. `fail` mode stops instead.
+   by overlap bp. Substantial direct-projection edges (at least 1 Mb and at
+   least 20% of the shorter unitig by default) are protected and cannot be
+   removed. Envelope-only edges remain eligible for relaxation. Record every
+   removed edge. `fail` mode stops instead.
 5. By default, divide each Hi-C count by the product of the two unitig dosages,
    preventing collapsed unitigs from receiving an artificial interaction
    advantage. `--hic_link_normalization raw` keeps the original read-pair
@@ -79,6 +82,8 @@ when one haplotype is represented by an exceptionally long unitig.
 | `--cluster_max_phase_interval_relaxations` | 2 | Maximum weak edges released by one interval move |
 | `--cluster_max_backtracks` | 1,000,000 | Hard limit for exact constraint search |
 | `--cluster_constraint_relaxation` | `weakest` | Resolve impossible cliques or stop with `fail` |
+| `--cluster_protected_direct_overlap_bp` | 1,000,000 | Minimum accepted-block overlap for a protected direct edge |
+| `--cluster_protected_direct_short_overlap` | 0.20 | Minimum direct overlap fraction of the shorter unitig |
 
 The clustering utility also exposes phase-block controls directly:
 
@@ -97,6 +102,9 @@ The clustering utility also exposes phase-block controls directly:
 | `--max-constraint-relaxation-overlap` | 0.30 | Maximum endpoint overlap fraction for those edges |
 | `--max-phase-interval-rounds` | 4 | Maximum internal-interval rounds |
 | `--max-phase-interval-relaxations` | 2 | Maximum weak edges released by one interval move |
+| `--allelic-pairs` | none | Pair-evidence sidecar generated with the allelic table |
+| `--protected-direct-overlap-bp` | 1,000,000 | Minimum direct-projection overlap for protection |
+| `--protected-direct-short-overlap` | 0.20 | Minimum direct overlap fraction of the shorter unitig |
 
 ## Outputs Per Chromosome
 
@@ -110,6 +118,7 @@ The clustering utility also exposes phase-block controls directly:
 | `cluster_summary.json` | Inputs, parameters, group sizes, search/refinement metrics, and validation |
 | `cluster_constraint_violations.tsv` | Must contain only its header in an accepted run |
 | `cluster_relaxed_constraints.tsv` | Every deliberately relaxed edge and its evidence |
+| `cluster_protected_constraints.tsv` | Every non-relaxable edge, protection reason, table overlap, and direct-projection support |
 | `cluster_phase_block_moves.tsv` | Boundary, group permutation, objective change, and relaxed edges for every accepted phase-block move |
 | `cluster_constraint_relaxation_moves.tsv` | Unitig move, local Hi-C evidence, objective change, and released weak edges |
 | `cluster_phase_interval_moves.tsv` | Two interval boundaries, group permutation, objective change, and released edges |

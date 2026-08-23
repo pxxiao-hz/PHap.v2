@@ -567,7 +567,10 @@ def cluster(
     protected_long_unitig_length=5_000_000,
     protected_length_ratio=5.0,
     protected_short_overlap=0.50,
+    protected_direct_overlap_bp=1_000_000,
+    protected_direct_short_overlap=0.20,
     hic_link_normalization='dosage',
+    allelic_pairs_file=None,
 ):
     cluster_script = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
@@ -603,8 +606,12 @@ def cluster(
         '--protected-long-unitig-length', str(protected_long_unitig_length),
         '--protected-length-ratio', str(protected_length_ratio),
         '--protected-short-overlap', str(protected_short_overlap),
+        '--protected-direct-overlap-bp', str(protected_direct_overlap_bp),
+        '--protected-direct-short-overlap', str(protected_direct_short_overlap),
         '--hic-link-normalization', hic_link_normalization,
     ]
+    if allelic_pairs_file is not None:
+        command.extend(['--allelic-pairs', allelic_pairs_file])
     if flank is not None:
         command.extend(['--flank', str(flank)])
     subprocess.run(command, check=True)
@@ -740,6 +747,8 @@ def parse_arguments():
     cluster.add_argument('--cluster_protected_long_unitig_length', type=int, default=5000000)
     cluster.add_argument('--cluster_protected_length_ratio', type=float, default=5.0)
     cluster.add_argument('--cluster_protected_short_overlap', type=float, default=0.50)
+    cluster.add_argument('--cluster_protected_direct_overlap_bp', type=int, default=1000000)
+    cluster.add_argument('--cluster_protected_direct_short_overlap', type=float, default=0.20)
 
     recluster = parser.add_argument_group('>>> Recluster based on Hi-C links')
     recluster.add_argument(
@@ -865,6 +874,7 @@ def main():
     chain_qc_file = os.path.join(step1_dir, 'collinear_chain.qc.tsv')
     selection_summary_file = os.path.join(step1_dir, 'chromosome_selection.summary.json')
     allelic_table_file = os.path.join(step1_dir, 'corrected_allelic_table.txt')
+    allelic_pairs_file = os.path.join(step1_dir, 'allelic_pairs.tsv')
 
     try:
         # Minimap2 alignment
@@ -907,7 +917,7 @@ def main():
             '--projections', os.path.join(step1_dir, 'unitig_projections.tsv'),
             '--qc', os.path.join(step1_dir, 'allelic_table.qc.tsv'),
             '--rejected', os.path.join(step1_dir, 'rejected_projections.tsv'),
-            '--pairs', os.path.join(step1_dir, 'allelic_pairs.tsv'),
+            '--pairs', allelic_pairs_file,
             '--summary', os.path.join(step1_dir, 'allelic_table.summary.json'),
             '--ploidy', str(args.top_n),
             '--max-projection-gap', str(args.max_projection_gap),
@@ -991,6 +1001,13 @@ def main():
             for row in source:
                 if row.split('\t', 1)[0] == chr:
                     destination.write(row)
+        allelic_pairs_chr = f'{chr}.allelic_pairs.tsv'
+        with open(allelic_pairs_file) as source, open(allelic_pairs_chr, 'w') as destination:
+            header = source.readline()
+            destination.write(header)
+            for row in source:
+                if row.split('\t', 1)[0] == chr:
+                    destination.write(row)
         cluster(
             file,
             args.full_links,
@@ -1018,7 +1035,10 @@ def main():
             protected_long_unitig_length=args.cluster_protected_long_unitig_length,
             protected_length_ratio=args.cluster_protected_length_ratio,
             protected_short_overlap=args.cluster_protected_short_overlap,
+            protected_direct_overlap_bp=args.cluster_protected_direct_overlap_bp,
+            protected_direct_short_overlap=args.cluster_protected_direct_short_overlap,
             hic_link_normalization=args.hic_link_normalization,
+            allelic_pairs_file=allelic_pairs_chr,
         )
         # cluster(args.p_utg, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
     os.chdir(cwd)

@@ -337,6 +337,15 @@ class AllelicTableTests(unittest.TestCase):
 
             summary = json.loads(paths["summary"].read_text())
             self.assertEqual(summary["status_counts"]["over_capacity_ambiguous"], 1)
+            with paths["pairs"].open() as handle:
+                pairs = list(csv.DictReader(handle, delimiter="\t"))
+            pair_ac = next(
+                row
+                for row in pairs
+                if {row["unitig1"], row["unitig2"]} == {"A", "C"}
+            )
+            self.assertEqual(pair_ac["direct_projection_overlap_bp"], "100000")
+            self.assertEqual(pair_ac["evidence_class"], "direct_projection")
             with paths["rejected"].open() as handle:
                 rejected = list(csv.DictReader(handle, delimiter="\t"))
             self.assertFalse(any(row["unitig"] == "I" for row in rejected))
@@ -593,6 +602,14 @@ class AllelicTableTests(unittest.TestCase):
                 if frozenset(("long", fragment)) in emitted_pairs
             }
             self.assertEqual(len(retained_fragments), 1)
+            retained_pair = next(
+                row
+                for row in pairs
+                if frozenset((row["unitig1"], row["unitig2"]))
+                == frozenset(("long", next(iter(retained_fragments))))
+            )
+            self.assertEqual(retained_pair["direct_projection_overlap_bp"], "0")
+            self.assertEqual(retained_pair["evidence_class"], "envelope_only")
             with paths["output"].with_name(
                 "deferred_overcapacity_unitigs.tsv"
             ).open() as handle:

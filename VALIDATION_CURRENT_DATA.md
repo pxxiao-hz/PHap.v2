@@ -229,3 +229,28 @@ allelic-block adjustment on chr02, chr05, and chr08. All twelve recluster
 summaries and the final rescue summary report zero validation violations. The
 rescue stage still assigns 45 of 544 candidates. The validated output is
 `02.cluster.v2.best_dosage_block_longprotect_20260823`.
+
+## 2026-08-24 chr06 Direct-Evidence and Counterfactual Validation
+
+`utg000175l` and `utg000193l` have 2,309,635 bp of allelic-table overlap and
+274 raw Hi-C links, but the table overlap is produced by the long-path envelope
+of `utg000175l`; their accepted projection blocks overlap by only a one-base
+boundary touch. Direct sequence alignment covers about 30% of either sequence
+at 85.1% identity. They have no direct GFA edge, no shared graph neighbor, and
+no shared hifiasm `A`-record read.
+
+In contrast, `utg000150l`/`utg000175l` share both graph endpoints, align over
+almost their full lengths at 99.07% identity, and have 3,471,185 bp of direct
+projection overlap. `utg000093l`/`utg000193l` share 82 assembly reads and have
+4,131,826 bp of direct projection overlap. These two pairs are protected by the
+new evidence-aware rule and remain in separate haplotypes.
+
+The evidence-aware chr06 rerun is assignment-identical to the previous best
+run. A counterfactual run that falsely protects `utg000175l`/`utg000193l`
+changes 44 memberships after group-label alignment. It replaces the current
+same-group Hi-C pairs `093/150` and `175/193` (1,003 + 274 links) with
+`093/175` and `150/193` (32 + 6 links), reduces final Hi-C cohesion from
+0.876897 to 0.873370, and raises parental-marker mixture from 0.677% to 0.790%.
+Parent markers were used only for this post hoc evaluation. The result supports
+co-haplotype membership for `175/193`, not a claim that the two sequences are
+physically adjacent.
