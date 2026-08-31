@@ -2,8 +2,10 @@
 
 > [!WARNING]
 > This branch is a **testing release**, not a stable production release.
-> Synthetic tests pass, but real-data validation of the complete
-> `phase_reads -> assembly -> scaffolding` workflow is still in progress.
+> All 58 automated tests pass. On autotetraploid potato, all 48 groups have
+> completed HiFi/ONT read assignment, extraction, reassembly, and yak
+> evaluation; Hi-C extraction is also complete for all 48 groups. HapHiC
+> scaffolding has been validated on two selected groups, but not yet on all 48.
 > It is published so that collaborators can evaluate other species and report
 > failures, parameter sensitivity, and ploidy-specific behavior. Do not replace
 > an established production workflow without validating all QC outputs.
@@ -147,6 +149,12 @@ Please check the [Pipeline](Pipeline.md).
 
 The upgraded read-assignment, reassembly, and scaffolding design is documented
 in [PHASE_READS_V2.md](PHASE_READS_V2.md).
+
+If HiFi/ONT assembly and Hi-C extraction were completed in separate runs, use
+`phap phase_reads --scaffold-only --assembly-dir DIR --hic-reads-dir DIR` to
+run HapHiC directly from those existing results. This mode supports
+`--groups`/`--chromosomes`, `--temp-dir`, and per-group `--resume` checkpoints;
+it does not require BAM inputs or `--contig-type`.
 
 ## Note
 **PHap** is currently developed and tested for _haplotype-resolved

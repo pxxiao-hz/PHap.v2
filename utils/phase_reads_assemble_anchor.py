@@ -20,11 +20,14 @@ from pathlib import Path
 
 from phase_reads_assignment import (
     AssignmentParameters,
+    assign_hic_fast_v1,
     assign_hic_pairs_disk,
     assign_long_reads_disk,
     collect_evidence_disk,
+    dispatch_paired_fastq_fast_v1,
     dispatch_paired_fastq_database,
     dispatch_single_fastq_database,
+    dispatch_single_fastq_seqkit,
     group_sort_key,
     group_target_lengths,
     parse_contig_types,
@@ -85,7 +88,7 @@ def parse_args(argv=None):
     add_path_argument(parser, "--bam-hic", "--bam_hic", type=Path)
     add_path_argument(parser, "--bam-ont", "--bam_ont", type=Path)
     add_path_argument(
-        parser, "--contig-type", "--contig_type", type=Path, required=True
+        parser, "--contig-type", "--contig_type", type=Path
     )
     parser.add_argument(
         "--group",
@@ -111,6 +114,35 @@ def parse_args(argv=None):
         help=(
             "Directory for PHap working files and SQLite/external-tool temporary "
             "files; final outputs remain under --output-dir"
+        ),
+    )
+    parser.add_argument(
+        "--scaffold-only",
+        action="store_true",
+        help=(
+            "Run only HapHiC scaffolding from existing per-group assemblies "
+            "and extracted Hi-C FASTQs; requires --assembly-dir and "
+            "--hic-reads-dir"
+        ),
+    )
+    add_path_argument(
+        parser,
+        "--assembly-dir",
+        "--assembly_dir",
+        type=Path,
+        help=(
+            "Existing per-group assembly directory containing "
+            "GROUP/GROUP.asm.bp.p_ctg.gfa (scaffold-only mode)"
+        ),
+    )
+    add_path_argument(
+        parser,
+        "--hic-reads-dir",
+        "--hic_reads_dir",
+        type=Path,
+        help=(
+            "Existing directory containing GROUP.Hi-C.1.fq.gz and "
+            "GROUP.Hi-C.2.fq.gz (scaffold-only mode)"
         ),
     )
     parser.add_argument("--stop-after", choices=STAGES, default="scaffold")
@@ -147,17 +179,35 @@ def parse_args(argv=None):
     )
     parser.add_argument("--min-group-margin", type=float, default=0.10)
     parser.add_argument("--balanced-score-tolerance", type=float, default=0.02)
-    parser.add_argument("--hifi-min-mapq", type=int, default=20)
     parser.add_argument("--hifi-min-alignment-length", type=int, default=1000)
     parser.add_argument("--hifi-min-identity", type=float, default=0.95)
-    parser.add_argument("--ont-min-mapq", type=int, default=20)
     parser.add_argument("--ont-min-alignment-length", type=int, default=1000)
     parser.add_argument("--ont-min-identity", type=float, default=0.75)
-    parser.add_argument("--hic-min-mapq", type=int, default=10)
     parser.add_argument("--hic-min-alignment-length", type=int, default=50)
     parser.add_argument("--hic-min-identity", type=float, default=0.90)
+    parser.add_argument(
+        "--hic-assignment-backend",
+        choices=("fast-v1", "sqlite"),
+        default="fast-v1",
+        help=(
+            "Hi-C assignment engine: corrected v1 primary-read1/RNEXT streaming "
+            "without evidence SQLite, or the detailed pair-evidence SQLite "
+            "engine [fast-v1]"
+        ),
+    )
     add_path_argument(parser, "--ont-length", "--ont_length", type=int, default=1)
     add_path_argument(parser, "--ont-quality", "--ont_quality", type=float, default=0.0)
+    parser.add_argument(
+        "--extract-backend", choices=("auto", "python", "seqkit"), default="auto",
+        help=(
+            "FASTQ extraction backend for HiFi/ONT: auto uses seqkit/gawk/pigz "
+            "when available and otherwise Python [auto]"
+        ),
+    )
+    parser.add_argument(
+        "--extract-threads", type=int, default=8,
+        help="Threads used by seqkit input decompression [8]",
+    )
     parser.add_argument(
         "--jobs", "--process", dest="jobs", type=int, default=4,
         help="Maximum concurrent group jobs [4]",
@@ -176,6 +226,9 @@ def parse_args(argv=None):
     parser.add_argument("--samblaster", default="samblaster")
     parser.add_argument("--filter-bam", default="filter_bam")
     parser.add_argument("--haphic", default="haphic")
+    parser.add_argument("--seqkit", default="seqkit")
+    parser.add_argument("--pigz", default="pigz")
+    parser.add_argument("--gawk", default="gawk")
     return parser.parse_args(argv)
 
 
@@ -183,6 +236,7 @@ def resolved_inputs(args):
     for name in (
         "bam_hifi", "bam_ont", "bam_hic", "contig_type", "group",
         "hifi", "ont", "hic1", "hic2", "output_dir", "temp_dir",
+        "assembly_dir", "hic_reads_dir",
     ):
         value = getattr(args, name)
         if value is not None:
@@ -190,8 +244,14 @@ def resolved_inputs(args):
 
 
 def validate_args(args):
-    if args.jobs < 1 or args.threads_per_job < 1 or args.haphic_processes < 1:
-        raise ValueError("jobs, threads-per-job, and haphic-processes must be positive")
+    if (
+        args.jobs < 1 or args.threads_per_job < 1
+        or args.haphic_processes < 1 or args.extract_threads < 1
+    ):
+        raise ValueError(
+            "jobs, threads-per-job, haphic-processes, and extract-threads "
+            "must be positive"
+        )
     if args.progress_every < 1:
         raise ValueError("--progress-every must be positive")
     if args.rerun_from and not args.resume:
@@ -204,7 +264,48 @@ def validate_args(args):
         raise ValueError("--balanced-score-tolerance must be between zero and one")
     if args.ont_length < 0 or args.ont_quality < 0:
         raise ValueError("ONT length and quality filters cannot be negative")
+    if args.scaffold_only:
+        if args.stop_after != "scaffold":
+            raise ValueError("--scaffold-only requires --stop-after scaffold")
+        if args.rerun_from not in (None, "scaffold"):
+            raise ValueError(
+                "--scaffold-only supports only --rerun-from scaffold"
+            )
+        missing_arguments = [
+            label for value, label in (
+                (args.assembly_dir, "--assembly-dir"),
+                (args.hic_reads_dir, "--hic-reads-dir"),
+            ) if value is None
+        ]
+        if missing_arguments:
+            raise ValueError(
+                "--scaffold-only requires " + " and ".join(missing_arguments)
+            )
+        required = [args.group, args.assembly_dir, args.hic_reads_dir]
+        missing = [str(path) for path in required if not path.exists()]
+        if missing:
+            raise FileNotFoundError(f"Missing scaffold-only inputs: {', '.join(missing)}")
+        non_directories = [
+            str(path) for path in (args.assembly_dir, args.hic_reads_dir)
+            if not path.is_dir()
+        ]
+        if non_directories:
+            raise ValueError(
+                "Scaffold-only input is not a directory: "
+                + ", ".join(non_directories)
+            )
+        if args.temp_dir is not None:
+            if args.temp_dir.exists() and not args.temp_dir.is_dir():
+                raise ValueError(f"--temp-dir is not a directory: {args.temp_dir}")
+            args.temp_dir.mkdir(parents=True, exist_ok=True)
+        return
+    if args.assembly_dir is not None or args.hic_reads_dir is not None:
+        raise ValueError(
+            "--assembly-dir and --hic-reads-dir require --scaffold-only"
+        )
     args.data_types = list(dict.fromkeys(args.data_types))
+    if args.contig_type is None:
+        raise ValueError("--contig-type is required unless --scaffold-only is used")
     required = [args.contig_type, args.group]
     for kind in args.data_types:
         value = getattr(args, f"bam_{kind}")
@@ -367,6 +468,77 @@ def file_signature(path: Path):
     return result
 
 
+def scaffold_stage_configuration(args, inputs=None):
+    return {
+        "inputs": inputs or {},
+        "parameters": {
+            "bwa": args.bwa,
+            "samtools": args.samtools,
+            "samblaster": args.samblaster,
+            "filter_bam": args.filter_bam,
+            "haphic": args.haphic,
+            "haphic_nx": args.haphic_nx,
+            "haphic_nm": args.haphic_nm,
+            "run_juicebox": args.run_juicebox,
+        },
+        "runtime": {
+            "jobs": args.jobs,
+            "threads_per_job": args.threads_per_job,
+            "haphic_processes": args.haphic_processes,
+        },
+    }
+
+
+def scaffold_only_group_inputs(args, groups):
+    result = {}
+    missing = []
+    empty = []
+    for group in sorted(groups, key=group_sort_key):
+        paths = {
+            "assembly_gfa": (
+                args.assembly_dir / group / f"{group}.asm.bp.p_ctg.gfa"
+            ),
+            "hic1": args.hic_reads_dir / f"{group}.Hi-C.1.fq.gz",
+            "hic2": args.hic_reads_dir / f"{group}.Hi-C.2.fq.gz",
+        }
+        for path in paths.values():
+            if not path.exists():
+                missing.append(str(path))
+            elif not path.is_file() or path.stat().st_size == 0:
+                empty.append(str(path))
+        result[group] = paths
+    if missing:
+        raise FileNotFoundError(
+            "Missing scaffold-only group inputs: " + ", ".join(missing)
+        )
+    if empty:
+        raise ValueError(
+            "Empty scaffold-only group inputs: " + ", ".join(empty)
+        )
+    return result
+
+
+def scaffold_only_configuration(args, group_inputs):
+    inputs = {
+        "assembly_dir": str(args.assembly_dir),
+        "hic_reads_dir": str(args.hic_reads_dir),
+        "groups": {
+            group: {
+                name: file_signature(path) for name, path in paths.items()
+            }
+            for group, paths in group_inputs.items()
+        },
+    }
+    return {
+        "runtime": {
+            "temp_dir": str(args.temp_dir) if args.temp_dir is not None else None,
+        },
+        "stages": {
+            "scaffold": scaffold_stage_configuration(args, inputs),
+        },
+    }
+
+
 def configuration(args):
     def signatures(names):
         return {
@@ -390,10 +562,12 @@ def configuration(args):
                         "seed", "collapsed_policy", "unknown_contig_type_policy",
                         "groups", "chromosomes",
                         "min_group_margin", "balanced_score_tolerance",
-                        "hifi_min_mapq", "hifi_min_alignment_length", "hifi_min_identity",
-                        "ont_min_mapq", "ont_min_alignment_length", "ont_min_identity",
-                        "hic_min_mapq", "hic_min_alignment_length", "hic_min_identity",
+                        "hifi_min_alignment_length", "hifi_min_identity",
+                        "ont_min_alignment_length", "ont_min_identity",
+                        "hic_min_alignment_length", "hic_min_identity",
+                        "hic_assignment_backend",
                     )
+                    if name != "hic_assignment_backend" or "hic" in args.data_types
                 } | {"data_types": args.data_types},
             },
             "extract": {
@@ -409,6 +583,14 @@ def configuration(args):
                     "ont_quality": args.ont_quality,
                     "data_types": args.data_types,
                 },
+                "runtime": {
+                    "backend_requested": args.extract_backend,
+                    "backend_resolved": getattr(
+                        args, "_extract_backend", args.extract_backend
+                    ),
+                    "extract_threads": args.extract_threads,
+                    "tools": getattr(args, "_extract_tools", {}),
+                },
             },
             "assemble": {
                 "inputs": {},
@@ -420,24 +602,7 @@ def configuration(args):
                     "threads_per_job": args.threads_per_job,
                 },
             },
-            "scaffold": {
-                "inputs": {},
-                "parameters": {
-                    "bwa": args.bwa,
-                    "samtools": args.samtools,
-                    "samblaster": args.samblaster,
-                    "filter_bam": args.filter_bam,
-                    "haphic": args.haphic,
-                    "haphic_nx": args.haphic_nx,
-                    "haphic_nm": args.haphic_nm,
-                    "run_juicebox": args.run_juicebox,
-                },
-                "runtime": {
-                    "jobs": args.jobs,
-                    "threads_per_job": args.threads_per_job,
-                    "haphic_processes": args.haphic_processes,
-                },
-            },
+            "scaffold": scaffold_stage_configuration(args),
         },
     }
 
@@ -461,11 +626,12 @@ def load_manifest(path: Path):
         return json.load(handle)
 
 
-def save_manifest(path: Path, config, completed_stages):
+def save_manifest(path: Path, config, completed_stages, mode="pipeline"):
     write_json(
         path,
         {
             "format_version": 2,
+            "mode": mode,
             "configuration": config,
             "completed_stages": list(completed_stages),
         },
@@ -595,7 +761,6 @@ def replace_directory_atomically(target: Path, builder, temp_directory=None):
 
 def assignment_parameters(args, kind):
     return AssignmentParameters(
-        min_mapq=getattr(args, f"{kind}_min_mapq"),
         min_alignment_length=getattr(args, f"{kind}_min_alignment_length"),
         min_identity=getattr(args, f"{kind}_min_identity"),
         min_total_aligned_bp=getattr(args, f"{kind}_min_alignment_length"),
@@ -627,10 +792,68 @@ def run_assignment_stage(
             "[assign %d/%d] %s: checking checkpoint",
             index, len(specifications), kind.upper(),
         )
+        complete_path = checkpoints / f"{kind}.complete.json"
+        type_summary_path = target / f"{kind}.summary.json"
+        if kind == "hic" and args.hic_assignment_backend == "fast-v1":
+            assignment_directory = target / "hic.fast_v1"
+            required = [
+                assignment_directory / "summary.json",
+                *(
+                    assignment_directory / f"{group}.read_ids.txt"
+                    for group in model.groups
+                ),
+                type_summary_path,
+            ]
+            if reuse and complete_path.exists() and all(
+                value.exists() for value in required
+            ):
+                LOGGER.info(
+                    "[assign %d/%d] HIC: fast-v1 checkpoint complete; skipped",
+                    index, len(specifications),
+                )
+                type_summaries[kind] = load_manifest(type_summary_path)
+                databases[kind] = assignment_directory
+                continue
+
+            parameters = assignment_parameters(args, kind)
+            temp_stage = stage_temp_directory(args, "01.assignments")
+
+            def build_fast_v1(directory):
+                return assign_hic_fast_v1(
+                    bam_path, directory, model, parameters, seed,
+                    ProgressLog("assign:hic:fast-v1", args.progress_every),
+                    progress_every=args.progress_every,
+                )
+
+            fast_summary = replace_directory_atomically(
+                assignment_directory, build_fast_v1, temp_stage
+            )
+            type_summary = {
+                "backend": "fast-v1",
+                "bam": fast_summary["bam_stats"],
+                "assignments": fast_summary["assignments"],
+                "analysis_groups": list(model.groups),
+                "output_groups": list(output_model.groups),
+                "read_id_directory": str(assignment_directory),
+                "semantics": fast_summary["semantics"],
+            }
+            write_json_atomic(type_summary_path, type_summary)
+            write_json_atomic(
+                complete_path,
+                {"complete": True, "kind": kind, "backend": "fast-v1"},
+            )
+            type_summaries[kind] = type_summary
+            databases[kind] = assignment_directory
+            LOGGER.info(
+                "[assign %d/%d] HIC fast-v1 complete: %s assigned, %s deferred",
+                index, len(specifications),
+                f"{fast_summary['assignments']['assigned']:,}",
+                f"{fast_summary['assignments']['unassigned']:,}",
+            )
+            continue
+
         decision_database = target / f"{kind}.assignments.sqlite"
         assignment_table = target / f"{kind}.assignments.tsv.gz"
-        type_summary_path = target / f"{kind}.summary.json"
-        complete_path = checkpoints / f"{kind}.complete.json"
         required = (decision_database, assignment_table, type_summary_path)
         if reuse and checkpoint_complete(complete_path, required):
             LOGGER.info(
@@ -722,9 +945,15 @@ def run_assignment_stage(
     return databases
 
 
-def load_assignment_stage(target: Path, data_types=("hifi", "ont", "hic")):
+def load_assignment_stage(
+    target: Path, data_types=("hifi", "ont", "hic"), hic_backend="fast-v1"
+):
     databases = {
-        kind: target / f"{kind}.assignments.sqlite"
+        kind: (
+            target / "hic.fast_v1"
+            if kind == "hic" and hic_backend == "fast-v1"
+            else target / f"{kind}.assignments.sqlite"
+        )
         for kind in data_types
     }
     missing = [str(path) for path in databases.values() if not path.exists()]
@@ -776,9 +1005,18 @@ def run_extraction_stage(
             )
             summaries[kind] = load_manifest(summary_path)
             continue
+        backend = (
+            args._extract_backend
+            if kind in ("hifi", "ont")
+            else (
+                "fast-v1-seqkit"
+                if args.hic_assignment_backend == "fast-v1"
+                else "python-paired"
+            )
+        )
         LOGGER.info(
-            "[extract %d/%d] %s started",
-            index, len(specifications), kind.upper(),
+            "[extract %d/%d] %s started; backend=%s",
+            index, len(specifications), kind.upper(), backend,
         )
         temp_stage = stage_temp_directory(args, "02.reads")
         temporary = Path(
@@ -792,9 +1030,32 @@ def run_extraction_stage(
                 f"extract:{kind}", max(args.progress_every // 10, 10_000)
             )
             if kind == "hic":
-                summary = dispatch_paired_fastq_database(
-                    input1, input2, databases[kind], model.groups, temporary,
-                    progress,
+                if args.hic_assignment_backend == "fast-v1":
+                    summary = dispatch_paired_fastq_fast_v1(
+                        input1, input2, databases[kind], model.groups, temporary,
+                        seqkit=args._extract_tools["seqkit"],
+                        pigz=args._extract_tools["pigz"],
+                        gawk=args._extract_tools["gawk"],
+                        threads=args.extract_threads,
+                        jobs=args.jobs,
+                        progress=progress,
+                    )
+                else:
+                    summary = dispatch_paired_fastq_database(
+                        input1, input2, databases[kind], model.groups, temporary,
+                        progress,
+                    )
+            elif args._extract_backend == "seqkit":
+                summary = dispatch_single_fastq_seqkit(
+                    input1, databases[kind], model.groups, temporary, suffix,
+                    min_length=args.ont_length if kind == "ont" else 0,
+                    min_mean_quality=args.ont_quality if kind == "ont" else 0,
+                    seqkit=args._extract_tools["seqkit"],
+                    pigz=args._extract_tools["pigz"],
+                    gawk=args._extract_tools["gawk"],
+                    threads=args.extract_threads,
+                    progress=progress,
+                    progress_every=max(args.progress_every // 10, 10_000),
                 )
             else:
                 summary = dispatch_single_fastq_database(
@@ -830,6 +1091,51 @@ def command_path(command):
     if resolved is None:
         raise FileNotFoundError(f"Required tool is not on PATH: {command}")
     return resolved
+
+
+def configure_extraction_backend(args):
+    """Resolve optional fast tools once and record the actual backend."""
+    args._extract_backend = "python"
+    args._extract_tools = {}
+    fast_hic_requires_tools = (
+        "hic" in args.data_types
+        and args.hic_assignment_backend == "fast-v1"
+        and STAGES.index(args.stop_after) >= STAGES.index("extract")
+    )
+    if args.extract_backend == "python" and not fast_hic_requires_tools:
+        LOGGER.info("FASTQ extraction backend: python (requested)")
+        return
+    requested = {
+        "seqkit": args.seqkit,
+        "pigz": args.pigz,
+        "gawk": args.gawk,
+    }
+    resolved = {}
+    missing = []
+    for name, command in requested.items():
+        try:
+            resolved[name] = command_path(command)
+        except FileNotFoundError as exc:
+            missing.append(str(exc))
+    if missing:
+        if args.extract_backend == "seqkit" or fast_hic_requires_tools:
+            raise FileNotFoundError("; ".join(missing))
+        LOGGER.warning(
+            "FASTQ extraction backend: python; fast tools unavailable: %s",
+            "; ".join(missing),
+        )
+        return
+    args._extract_backend = (
+        "python" if args.extract_backend == "python" else "seqkit"
+    )
+    args._extract_tools = resolved
+    LOGGER.info(
+        "FASTQ extraction tools ready: long-read-backend=%s "
+        "(seqkit=%s, gawk=%s, pigz=%s, input_threads=%d)",
+        args._extract_backend,
+        resolved["seqkit"], resolved["gawk"], resolved["pigz"],
+        args.extract_threads,
+    )
 
 
 def fastq_has_records(path: Path):
@@ -1072,6 +1378,52 @@ def run_scaffold_stage(
     return summary
 
 
+def run_scaffold_only(args, output: Path):
+    manifest_path = output / "run_manifest.json"
+    previous = load_manifest(manifest_path)
+    if previous is not None and previous.get("mode", "pipeline") != "scaffold-only":
+        raise ValueError(
+            "--scaffold-only output contains a non-scaffold run_manifest.json; "
+            "choose a new --output-dir"
+        )
+
+    full_model = parse_group_file(args.group)
+    _, output_model = select_group_models(full_model, args)
+    group_inputs = scaffold_only_group_inputs(args, output_model.groups)
+    config = scaffold_only_configuration(args, group_inputs)
+    completed = (
+        list(previous.get("completed_stages", []))
+        if args.resume and previous is not None else []
+    )
+    if args.rerun_from == "scaffold":
+        completed = []
+    if args.resume and previous is not None:
+        validate_resume_configuration(
+            previous.get("configuration", {}), config, completed
+        )
+
+    chromosomes = sorted(set(output_model.group_chromosome.values()))
+    LOGGER.info(
+        "scaffold-only selection: %d groups, chromosomes=%s",
+        len(output_model.groups), ",".join(chromosomes),
+    )
+    LOGGER.info("scaffold-only assembly input: %s", args.assembly_dir)
+    LOGGER.info("scaffold-only Hi-C input: %s", args.hic_reads_dir)
+    save_manifest(manifest_path, config, completed, mode="scaffold-only")
+
+    scaffold_directory = output / "04.scaffold"
+    LOGGER.info("[scaffold-only] scaffold started/checking group checkpoints")
+    run_scaffold_stage(
+        args, output_model, args.hic_reads_dir, args.assembly_dir,
+        scaffold_directory, config["stages"]["scaffold"],
+    )
+    completed = ["scaffold"]
+    save_manifest(manifest_path, config, completed, mode="scaffold-only")
+    LOGGER.info("[scaffold-only] scaffold complete")
+    prune_empty_temp_workspace(args)
+    return {"completed_stages": completed}
+
+
 def run(args):
     resolved_inputs(args)
     validate_args(args)
@@ -1090,11 +1442,15 @@ def run(args):
         )
         LOGGER.addHandler(file_handler)
     LOGGER.info(
-        "phase_reads v2 started; stop_after=%s resume=%s rerun_from=%s",
+        "phase_reads v2 started; mode=%s stop_after=%s resume=%s rerun_from=%s",
+        "scaffold-only" if args.scaffold_only else "pipeline",
         args.stop_after, args.resume, args.rerun_from or "none",
     )
     if args.temp_dir is not None:
         LOGGER.info("temporary workspace: %s", args._temp_workspace)
+    if args.scaffold_only:
+        return run_scaffold_only(args, output)
+    configure_extraction_backend(args)
     manifest_path = output / "run_manifest.json"
     config = configuration(args)
     previous = load_manifest(manifest_path)
@@ -1120,18 +1476,30 @@ def run(args):
         ",".join(sorted(set(model.group_chromosome.values()))),
     )
     assignment_directory = output / "01.assignments"
-    assignment_files_exist = all(
-        (assignment_directory / name).exists() for name in (
-            ["assignment_summary.json"]
-            + [
-                f"{kind}.{suffix}"
-                for kind in args.data_types
+    assignment_required = [assignment_directory / "assignment_summary.json"]
+    for kind in args.data_types:
+        if kind == "hic" and args.hic_assignment_backend == "fast-v1":
+            fast_directory = assignment_directory / "hic.fast_v1"
+            assignment_required.extend(
+                [
+                    assignment_directory / "hic.summary.json",
+                    fast_directory / "summary.json",
+                    *(
+                        fast_directory / f"{group}.read_ids.txt"
+                        for group in model.groups
+                    ),
+                ]
+            )
+        else:
+            assignment_required.extend(
+                assignment_directory / f"{kind}.{suffix}"
                 for suffix in ("assignments.tsv.gz", "assignments.sqlite")
-            ]
-        )
-    )
+            )
+    assignment_files_exist = all(path.exists() for path in assignment_required)
     if args.resume and "assign" in completed and assignment_files_exist:
-        decisions = load_assignment_stage(assignment_directory, args.data_types)
+        decisions = load_assignment_stage(
+            assignment_directory, args.data_types, args.hic_assignment_backend
+        )
         LOGGER.info("[stage 1/4] assign checkpoint complete; loading disk indexes")
     else:
         LOGGER.info("[stage 1/4] assign started")

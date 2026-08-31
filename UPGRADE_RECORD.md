@@ -337,3 +337,68 @@ reads 深度均衡，不代表当前最新版聚类算法的最终生物学结�
 优化解除。仅有包络证据的边仍可在不可满足图中按弱度放松。
 
 该规则不使用亲本信息。亲本yak仍只用于算法固定后的效果评估。
+
+## 13. phase_reads高速FASTQ提取（2026-08-24）
+
+- 新增`--extract-backend auto|seqkit|python`。默认`auto`在`seqkit`、`gawk`和
+  `pigz`齐全时使用高速后端，否则记录警告并回退到Python兼容后端；可用
+  `--seqkit`、`--gawk`、`--pigz`指定程序路径。
+- HiFi/ONT高速后端将assignment SQLite顺序导出为`read_id -> group`映射，
+  `seqkit fx2tab`只扫描一次原始FASTQ，gawk在内存中查表并通过FIFO同时分流到
+  所有groups，每个输出由单线程pigz并行压缩。不生成未压缩FASTQ中间文件，
+  原始FASTQ保持只读。
+- 新增`--extract-threads`控制seqkit输入解压线程；backend、线程和工具路径写入
+  manifest的runtime字段，不使已经完成的提取checkpoint失效。
+- 保留requested/found/missing/duplicate、每组read数、长度与质量过滤审计。
+  质量阈值为0时完全跳过逐碱基质量计算；非0时仍按原Python算法计算算术平均
+  Phred值，避免seqkit错误概率平均造成方法变化。Hi-C继续使用成对Python后端。
+- 真实HiFi前5万条read测试中，40,146条已分配read全部正确写入48个groups；
+  缺失、额外、重复、group错误以及header/序列/质量不一致均为0。正式集成后
+  FIFO版本分流耗时2分42秒（约308 reads/s），相对原实现约34.7 reads/s提升
+  约8.9倍，最大内存约1.28 GiB。
+
+## 14. Hi-C修正v1快速模式（2026-08-28）
+
+- 新增`--hic-assignment-backend fast-v1|sqlite`，默认`fast-v1`。详细SQLite
+  pair-evidence算法保留用于受控对照，不再作为超大Hi-C数据的默认后端。
+- fast-v1只顺序读取primary read1，使用同一BAM记录的`reference_id`和RNEXT
+  获取两个mates的unitig归属；不使用MAPQ过滤或权重，不创建Hi-C evidence或
+  assignment SQLite。
+- 两端已有group集合有唯一交集时接受；无交集时作为mate conflict defer。一端
+  unitig未进入最终cluster时，可使用另一端已有group证据。
+- collapsed仍以完整unitig为单位，只在该unitig已经出现的目标groups中互斥
+  分配；按已分配pair数/目标group bp在线平衡，不定义局部区域或block，不复制
+  同一pair，也不丢弃v1随机切分中的“剩余部分”。
+- assignment直接写每个group的read-name文件。extract使用
+  `seqkit grep -> gawk在线计数 -> pigz`，两端输出数不一致或FASTQ缺失已分配ID
+  时终止；group并发受`--jobs`限制，单个seqkit线程由`--extract-threads`控制。
+- 真实Hi-C BAM的200万alignment-record小样本中，fast-v1用13.8秒完成，约
+  148,762 records/s，峰值内存约34 MB，无SQLite输出。旧详细模式在同一全量
+  任务的pair阶段约105 pairs/s；全量fast-v1 assignment按线性速度预计约4–8
+  小时，仍需以服务器实际I/O负载为准。
+
+## 15. scaffold-only独立挂载接口（2026-08-31）
+
+- 新增`phase_reads --scaffold-only`，允许HiFi/ONT组装和Hi-C FASTQ提取在
+  不同输出目录完成后直接衔接HapHiC，不再要求重跑assignment、extract或
+  assemble。
+- `--assembly-dir`读取`GROUP/GROUP.asm.bp.p_ctg.gfa`，`--hic-reads-dir`
+  读取成对的`GROUP.Hi-C.1/2.fq.gz`；两个输入目录及其文件保持只读，结果独立
+  写入`--output-dir/04.scaffold`。
+- scaffold-only不要求BAM、全量原始FASTQ或`--contig-type`，保留
+  `--groups`、`--chromosomes`、`--temp-dir`和资源控制参数。
+- 每个group继续使用独立原子输出和checkpoint；`--resume`跳过已完成group，
+  `--resume --rerun-from scaffold`主动重建。GFA或Hi-C FASTQ的路径、大小、
+  修改时间被记录到manifest，输入变化时拒绝静默复用旧结果。
+
+## 16. phase_reads当前真实数据验证边界（2026-08-31）
+
+- 58项自动化测试全部通过。
+- 马铃薯48个groups的HiFi/ONT assignment、FASTQ extraction和hifiasm组装均
+  已完成，48个组装结果均已运行yak后验评估。
+- corrected fast-v1 Hi-C assignment及48对group FASTQ提取均已完成。
+- scaffold-only已用`chr03_group1`和`chr09_group2`完成真实数据测试；BWA、
+  BAM过滤、HapHiC cluster/reassign/sort/build和group checkpoint均正常，所有
+  输入contig均保留。
+- 按当前测试安排，不运行全部48个groups的scaffold，也未测试Juicebox输出。
+  因此本分支仍是testing release，不能描述为完整生产验证版本。

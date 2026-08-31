@@ -91,8 +91,11 @@ phap phase_reads \
         --hic2 $wd/potato4.hic_2.fq.gz \
         --output-dir $wd/03.phase_reads \
         --stop-after extract \
+        --hic-assignment-backend fast-v1 \
         --collapsed-policy balanced \
         --progress-every 1000000 \
+        --extract-backend auto \
+        --extract-threads 8 \
         --threads-per-job 10 \
         --jobs 4 \
         --seed 100 \
@@ -111,6 +114,19 @@ Tool executables are resolved from `PATH`. Use `--hifiasm`, `--bwa`,
 explicit executable path when needed. `--jobs * --threads-per-job` is the
 maximum requested group-level CPU concurrency; avoid nested oversubscription.
 
+For HiFi and ONT FASTQ extraction, the default `--extract-backend auto` uses
+`seqkit`, `gawk`, and `pigz` when they are available. This backend reads the
+original FASTQ once, joins read IDs to the assignment SQLite index in memory,
+and streams all group outputs through named pipes to parallel pigz processes.
+Use `--seqkit`, `--gawk`, and `--pigz` for explicit tool paths, or
+`--extract-backend python` for the dependency-free HiFi/ONT compatibility
+backend. Hi-C defaults to `--hic-assignment-backend fast-v1`: primary read1
+and RNEXT are streamed directly into mutually exclusive group read-name files,
+without a Hi-C evidence SQLite. `seqkit grep`, gawk counting, and pigz then
+extract each paired group. Use `--hic-assignment-backend sqlite` only for the
+detailed legacy comparison mode. No uncompressed FASTQ intermediate or
+modification of an input FASTQ is performed.
+
 For large runs, `--temp-dir /path/to/phap_tmp` confines PHap, SQLite, and
 child-tool temporary files to that directory. Input BAM/FASTQ files are opened
 read-only and are never rewritten; final results remain under `--output-dir`.
@@ -126,6 +142,27 @@ assignment and extraction, use:
 ```shell
         --resume --rerun-from assemble --stop-after scaffold
 ```
+
+If HiFi/ONT assembly and Hi-C extraction were completed in separate output
+directories, run only the scaffolding stage without copying or modifying those
+inputs:
+
+```shell
+phap phase_reads \
+        --scaffold-only \
+        --group $wd/02.cluster.v2/05.rescue/group.reassignment.cluster.txt \
+        --assembly-dir $wd/03.phase_reads.hifi_ont/03.assembly \
+        --hic-reads-dir $wd/03.phase_reads.hic/02.reads \
+        --output-dir $wd/03.phase_reads.scaffold \
+        --temp-dir $wd/03.phase_reads.scaffold.tmp \
+        --jobs 4 \
+        --threads-per-job 5 \
+        --haphic-processes 1
+```
+
+Add `--groups chr03_group1 chr09_group2` or `--chromosomes chr03 chr09` for a
+small trial. The results are written under `OUTPUT/04.scaffold`; repeat the
+same command with `--resume` to skip groups with valid checkpoints.
 
 For a chromosome-scale trial, add for example:
 

@@ -1,5 +1,6 @@
 import gzip
 import json
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -248,6 +249,100 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             self.assertEqual(summary["written_pairs"], 1)
             self.assertEqual(summary["missing_pairs"], 0)
 
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("seqkit", "pigz", "gawk")),
+        "seqkit, pigz, and gawk are required for the fast backend test",
+    )
+    def test_seqkit_backend_preserves_reads_and_filters_quality(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            database = work / "assignments.sqlite"
+            with sqlite3.connect(database) as connection:
+                connection.execute(
+                    "CREATE TABLE decisions ("
+                    "read_id TEXT PRIMARY KEY, status TEXT, group_name TEXT)"
+                )
+                connection.executemany(
+                    "INSERT INTO decisions VALUES (?, 'assigned', ?)",
+                    (("keep", "chr1_group1"), ("filter", "chr1_group2")),
+                )
+                connection.execute(
+                    "CREATE INDEX decisions_status_group "
+                    "ON decisions(status, group_name)"
+                )
+            fastq = work / "reads.fq"
+            fastq.write_text(
+                "@keep description\nACGT\n+\n!I!I\n"
+                "@filter\nTGCA\n+\n!!!!\n"
+                "@unused\nGGGG\n+\nIIII\n"
+            )
+            output = work / "output"
+            summary = phase.dispatch_single_fastq_seqkit(
+                fastq, database,
+                ("chr1_group1", "chr1_group2"), output, "ONT",
+                seqkit=shutil.which("seqkit"),
+                pigz=shutil.which("pigz"),
+                gawk=shutil.which("gawk"),
+                threads=2, min_length=1, min_mean_quality=20,
+                progress_every=1,
+            )
+            self.assertEqual(summary["backend"], "seqkit")
+            self.assertEqual(summary["input_records"], 3)
+            self.assertEqual(summary["written_reads"], 1)
+            self.assertEqual(summary["filtered_assigned_reads"], 1)
+            self.assertEqual(summary["missing_reads"], 0)
+            with gzip.open(output / "chr1_group1.ONT.fq.gz", "rt") as handle:
+                self.assertEqual(
+                    handle.read(), "@keep description\nACGT\n+\n!I!I\n"
+                )
+            with gzip.open(output / "chr1_group2.ONT.fq.gz", "rt") as handle:
+                self.assertEqual(handle.read(), "")
+
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("seqkit", "pigz", "gawk")),
+        "seqkit, pigz, and gawk are required for fast-v1 Hi-C extraction",
+    )
+    def test_fast_v1_hic_seqkit_extraction_preserves_pairs(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            assignment = work / "assignment"
+            assignment.mkdir()
+            (assignment / "chr1_group1.read_ids.txt").write_text("pair1\npair3\n")
+            (assignment / "chr1_group2.read_ids.txt").write_text("pair2\n")
+            (assignment / "summary.json").write_text(json.dumps({
+                "assignments": {
+                    "groups": {
+                        "chr1_group1": {"pairs": 2},
+                        "chr1_group2": {"pairs": 1},
+                    }
+                }
+            }))
+            read1 = work / "hic1.fq"
+            read2 = work / "hic2.fq"
+            self.write_fastq(read1, ["pair1", "pair2", "pair3", "unused"], 20, 1)
+            self.write_fastq(read2, ["pair1", "pair2", "pair3", "unused"], 20, 2)
+            output = work / "output"
+            summary = phase.dispatch_paired_fastq_fast_v1(
+                read1, read2, assignment,
+                ("chr1_group1", "chr1_group2"), output,
+                seqkit=shutil.which("seqkit"),
+                pigz=shutil.which("pigz"),
+                gawk=shutil.which("gawk"),
+                threads=2, jobs=2,
+            )
+            with gzip.open(output / "chr1_group1.Hi-C.1.fq.gz", "rt") as handle:
+                text1 = handle.read()
+            with gzip.open(output / "chr1_group1.Hi-C.2.fq.gz", "rt") as handle:
+                text2 = handle.read()
+
+        self.assertEqual(summary["written_pairs"], 3)
+        self.assertEqual(summary["missing_pairs"], 0)
+        self.assertIn("@pair1/1", text1)
+        self.assertIn("@pair3/1", text1)
+        self.assertNotIn("@pair2/1", text1)
+        self.assertIn("@pair1/2", text2)
+        self.assertIn("@pair3/2", text2)
+
     def write_bam(self, path, records, read_length):
         header = {
             "HD": {"VN": "1.6"},
@@ -258,21 +353,157 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             ],
         }
         with pysam.AlignmentFile(path, "wb", header=header) as bam:
-            for name, reference, flag in records:
+            for record in records:
+                name, reference, flag = record[:3]
+                mapq = record[3] if len(record) > 3 else 60
                 alignment = pysam.AlignedSegment()
                 alignment.query_name = name
                 alignment.query_sequence = "A" * read_length
                 alignment.flag = flag
                 alignment.reference_id = {"A": 0, "B": 1, "C": 2}[reference]
                 alignment.reference_start = 0
-                alignment.mapping_quality = 60
+                alignment.mapping_quality = mapq
                 alignment.cigar = [(0, read_length)]
-                alignment.next_reference_id = alignment.reference_id
+                mate_reference = record[4] if len(record) > 4 else reference
+                alignment.next_reference_id = {
+                    "A": 0, "B": 1, "C": 2
+                }[mate_reference]
                 alignment.next_reference_start = 0
                 alignment.template_length = read_length * 2
                 alignment.query_qualities = pysam.qualitystring_to_array("I" * read_length)
                 alignment.set_tag("NM", 0)
                 bam.write(alignment)
+
+    def test_fast_v1_hic_is_disjoint_uses_rnext_and_ignores_mapq(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            bam = work / "hic.bam"
+            records = []
+            for name, reference, mate_reference, mapq in (
+                ("unique1", "A", "A", 60),
+                ("unique2", "B", "B", 60),
+                ("collapsed", "C", "C", 60),
+                ("anchor", "A", "C", 60),
+                ("conflict", "A", "B", 60),
+                ("mapq0", "B", "B", 0),
+            ):
+                records.extend(
+                    [
+                        (name, reference, 99, mapq, mate_reference),
+                        (name, mate_reference, 147, mapq, reference),
+                    ]
+                )
+            self.write_bam(bam, records, 100)
+            output = work / "fast"
+            summary = phase.assign_hic_fast_v1(
+                bam,
+                output,
+                model,
+                phase.AssignmentParameters(
+                    min_alignment_length=50,
+                    min_identity=0.90,
+                    collapsed_policy="balanced",
+                ),
+                seed=100,
+            )
+            group1 = set(
+                (output / "chr1_group1.read_ids.txt").read_text().splitlines()
+            )
+            group2 = set(
+                (output / "chr1_group2.read_ids.txt").read_text().splitlines()
+            )
+
+        self.assertFalse(group1 & group2)
+        self.assertEqual(group1 | group2, {
+            "unique1", "unique2", "collapsed", "anchor", "mapq0"
+        })
+        self.assertIn("anchor", group1)
+        self.assertIn("mapq0", group2)
+        self.assertNotIn("conflict", group1 | group2)
+        self.assertEqual(summary["assignments"]["assigned"], 5)
+        self.assertEqual(summary["assignments"]["unassigned"], 1)
+        self.assertEqual(
+            summary["assignments"]["basis_counts"]["hic_mates_conflict"], 1
+        )
+        self.assertFalse(any(output.glob("*.sqlite*")))
+
+    @unittest.skipUnless(
+        all(shutil.which(tool) for tool in ("seqkit", "pigz", "gawk")),
+        "seqkit, pigz, and gawk are required for fast-v1 workflow",
+    )
+    def test_public_fast_v1_hic_workflow_uses_no_sqlite(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            groups = work / "groups.txt"
+            groups.write_text("chr1_group1\tA C\nchr1_group2\tB C\n")
+            types = work / "types.tsv"
+            types.write_text(
+                "contig_ID\taverage_depth\tcontig_type\n"
+                "A\t20\thaplotig\nB\t20\thaplotig\nC\t40\tdiplotig\n"
+            )
+            bam = work / "hic.bam"
+            records = []
+            for name, reference, mate_reference in (
+                ("p1", "A", "A"),
+                ("p2", "B", "B"),
+                ("pc", "C", "C"),
+            ):
+                records.extend([
+                    (name, reference, 99, 0, mate_reference),
+                    (name, mate_reference, 147, 0, reference),
+                ])
+            self.write_bam(bam, records, 100)
+            hic1 = work / "hic1.fq"
+            hic2 = work / "hic2.fq"
+            self.write_fastq(hic1, ["p1", "p2", "pc"], 100, 1)
+            self.write_fastq(hic2, ["p1", "p2", "pc"], 100, 2)
+            output = work / "phase"
+            completed = subprocess.run(
+                [
+                    sys.executable, str(PHASE_SCRIPT),
+                    "--bam-hic", str(bam),
+                    "--contig-type", str(types),
+                    "--group", str(groups),
+                    "--hic1", str(hic1),
+                    "--hic2", str(hic2),
+                    "--output-dir", str(output),
+                    "--data-types", "hic",
+                    "--stop-after", "extract",
+                    "--hic-assignment-backend", "fast-v1",
+                    "--extract-threads", "2",
+                    "--jobs", "2",
+                ],
+                check=True, capture_output=True, text=True,
+            )
+            with (output / "02.reads" / "extraction_summary.json").open() as handle:
+                summary = json.load(handle)
+            sqlite_outputs = list(output.rglob("*.sqlite*"))
+
+        self.assertIn("phase_reads completed", completed.stdout)
+        self.assertEqual(summary["hic"]["written_pairs"], 3)
+        self.assertEqual(summary["hic"]["missing_pairs"], 0)
+        self.assertEqual(sqlite_outputs, [])
+
+    def test_mapq_zero_primary_alignment_is_retained_and_scored(self):
+        model = self.make_model()
+        with tempfile.TemporaryDirectory() as temporary:
+            bam = Path(temporary) / "mapq0.bam"
+            self.write_bam(bam, [("low_mapq", "A", 0, 0)], 1000)
+            observations, reference_lengths, stats = phase.collect_long_read_evidence(
+                bam, model, phase.AssignmentParameters()
+            )
+
+        self.assertIn("low_mapq", observations)
+        self.assertEqual(stats["retained_alignment_records"], 1)
+        hit = observations["low_mapq"].hits[0]
+        self.assertEqual(hit.mapq, 0)
+        self.assertEqual(hit.weight, 1.0)
+        evaluation = phase.evaluate_observation(
+            observations["low_mapq"], model, phase.AssignmentParameters()
+        )
+        self.assertEqual(evaluation.confident_group, "chr1_group1")
+        self.assertEqual(evaluation.reason, "alignment_confident")
 
     def write_fastq(self, path, names, read_length, mate=None):
         with path.open("w") as handle:
@@ -335,6 +566,7 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
                 "--group", str(groups),
                 "--output-dir", str(output),
                 "--temp-dir", str(temp_root),
+                "--hic-assignment-backend", "sqlite",
             ]
             input_signatures = {
                 path: (path.stat().st_size, path.stat().st_mtime_ns)
@@ -525,6 +757,128 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             with self.assertRaises(subprocess.CalledProcessError) as caught:
                 phase_workflow.run_pipe(commands, work, work / "mapping_pipe")
             self.assertEqual(caught.exception.returncode, 7)
+
+    def test_scaffold_only_uses_external_inputs_and_group_checkpoints(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            groups = work / "groups.txt"
+            groups.write_text("chr1_group1\tA\nchr1_group2\tB\n")
+            assemblies = work / "assemblies"
+            assembly_group = assemblies / "chr1_group1"
+            assembly_group.mkdir(parents=True)
+            (assembly_group / "chr1_group1.asm.bp.p_ctg.gfa").write_text(
+                "H\tVN:Z:1.0\nS\tctg1\tACGTACGT\n"
+            )
+            reads = work / "hic_reads"
+            reads.mkdir()
+            for mate in (1, 2):
+                with gzip.open(
+                    reads / f"chr1_group1.Hi-C.{mate}.fq.gz", "wt"
+                ) as handle:
+                    handle.write(f"@pair/{mate}\nACGT\n+\nIIII\n")
+
+            tools = work / "tools"
+            tools.mkdir()
+
+            def executable(name, text):
+                path = tools / name
+                path.write_text("#!/usr/bin/env python3\n" + text)
+                path.chmod(0o755)
+                return path
+
+            bwa = executable(
+                "bwa",
+                "import pathlib, sys\n"
+                "if sys.argv[1] == 'index':\n"
+                "    pathlib.Path(sys.argv[2] + '.bwt').write_text('index')\n"
+                "elif sys.argv[1] == 'mem':\n"
+                "    sys.stdout.write('@HD\\tVN:1.6\\n')\n",
+            )
+            samblaster = executable(
+                "samblaster",
+                "import sys\n"
+                "sys.stdout.buffer.write(sys.stdin.buffer.read())\n",
+            )
+            samtools = executable(
+                "samtools",
+                "import pathlib, sys\n"
+                "data = sys.stdin.buffer.read()\n"
+                "output = pathlib.Path(sys.argv[sys.argv.index('-o') + 1])\n"
+                "output.write_bytes(data or b'BAM')\n",
+            )
+            filter_bam = executable(
+                "filter_bam",
+                "import sys\n"
+                "sys.stdout.buffer.write(b'FILTERED')\n",
+            )
+            haphic = executable(
+                "haphic",
+                "import pathlib\n"
+                "build = pathlib.Path('04.build')\n"
+                "build.mkdir()\n"
+                "(build / 'scaffolds.fa').write_text('>scaffold\\nACGT\\n')\n",
+            )
+            output = work / "scaffold_run"
+            temp_root = work / "temp"
+            command = [
+                sys.executable, str(PHASE_SCRIPT),
+                "--scaffold-only",
+                "--group", str(groups),
+                "--assembly-dir", str(assemblies),
+                "--hic-reads-dir", str(reads),
+                "--output-dir", str(output),
+                "--temp-dir", str(temp_root),
+                "--groups", "chr1_group1",
+                "--jobs", "1",
+                "--threads-per-job", "1",
+                "--bwa", str(bwa),
+                "--samtools", str(samtools),
+                "--samblaster", str(samblaster),
+                "--filter-bam", str(filter_bam),
+                "--haphic", str(haphic),
+            ]
+            first = subprocess.run(
+                command, check=True, capture_output=True, text=True
+            )
+            second = subprocess.run(
+                command + ["--resume"],
+                check=True, capture_output=True, text=True,
+            )
+            (assembly_group / "chr1_group1.asm.bp.p_ctg.gfa").write_text(
+                "H\tVN:Z:1.0\nS\tctg1\tACGTACGTAA\n"
+            )
+            changed_input = subprocess.run(
+                command + ["--resume"], capture_output=True, text=True
+            )
+            with (output / "run_manifest.json").open() as handle:
+                manifest = json.load(handle)
+            build = (
+                output / "04.scaffold" / "chr1_group1"
+                / "02.haphic" / "04.build" / "scaffolds.fa"
+            )
+            checkpoint = (
+                output / "04.scaffold" / ".checkpoints"
+                / "chr1_group1.complete.json"
+            )
+            build_exists = build.exists()
+            checkpoint_exists = checkpoint.exists()
+
+        self.assertIn("completed stages: scaffold", first.stdout)
+        self.assertIn("completed stages: scaffold", second.stdout)
+        self.assertEqual(manifest["mode"], "scaffold-only")
+        self.assertEqual(manifest["completed_stages"], ["scaffold"])
+        self.assertEqual(
+            set(manifest["configuration"]["stages"]["scaffold"]["inputs"]["groups"]),
+            {"chr1_group1"},
+        )
+        self.assertTrue(build_exists)
+        self.assertTrue(checkpoint_exists)
+        self.assertIn("checkpoint complete; skipped chr1_group1", second.stderr)
+        self.assertNotEqual(changed_input.returncode, 0)
+        self.assertIn(
+            "resume parameters for completed stage scaffold differ",
+            changed_input.stderr,
+        )
 
 
 if __name__ == "__main__":

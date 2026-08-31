@@ -4,10 +4,11 @@
 
 Branch: `testing/v2-multispecies-20260823`
 
-This is a validation branch. The 50 synthetic and workflow regression tests
-pass, and chr01 HiFi assignment has been tested on real autotetraploid potato
-data. Complete real-data validation of HiFi/ONT/Hi-C extraction, haplotype
-reassembly, and scaffolding is still in progress.
+This is a validation branch. All 58 automated tests pass. On real
+autotetraploid potato data, all 48 groups have completed HiFi/ONT assignment,
+extraction, reassembly, and yak evaluation, and all 48 paired Hi-C group FASTQs
+have been extracted. HapHiC scaffolding has completed on two selected groups;
+full 48-group scaffolding and Juicebox review were not run.
 
 Parental information must not be supplied to clustering or read assignment.
 Parental k-mers or markers may be used only after the workflow is fixed, to
@@ -22,8 +23,9 @@ evaluate accuracy.
   is not yet certified.
 - Thresholds were not calibrated on diverse genome sizes, repeat content,
   heterozygosity levels, or sequencing depths.
-- `phase_reads` real-data testing is incomplete. Treat assembly and scaffolding
-  results as experimental.
+- `phase_reads` has extensive potato validation, but only two groups have been
+  scaffolded and no other species has completed end-to-end validation. Treat
+  results on a new species as experimental.
 - A chromosome- or group-limited `phase_reads` run still scans the complete raw
   FASTQ because FASTQ is not chromosome-indexed.
 

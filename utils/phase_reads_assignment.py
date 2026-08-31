@@ -9,10 +9,16 @@ import hashlib
 import heapq
 import itertools
 import json
+import os
 import re
+import shutil
 import sqlite3
+import subprocess
+import tempfile
 import time
+import zlib
 from collections import Counter, defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, Optional, Sequence, TextIO, Tuple
@@ -49,8 +55,12 @@ class AlignmentHit:
 
     @property
     def weight(self) -> float:
-        mapq_weight = min(max(self.mapq, 0), 60) / 60.0
-        return self.identity * mapq_weight
+        # MAPQ measures placement uniqueness, not alignment accuracy.  In a
+        # polyploid assembly, a high-identity read can legitimately have
+        # MAPQ=0 because several allelic unitigs are nearly identical.  Keep
+        # MAPQ in the evidence table for auditing, but do not use it to filter
+        # or down-weight phase-read evidence.
+        return self.identity
 
 
 @dataclass
@@ -93,7 +103,6 @@ class AssignmentDecision:
 
 @dataclass(frozen=True)
 class AssignmentParameters:
-    min_mapq: int = 20
     min_alignment_length: int = 1000
     min_identity: float = 0.80
     min_total_aligned_bp: int = 1000
@@ -264,8 +273,6 @@ def _alignment_filter_reason(alignment, parameters: AssignmentParameters):
         return "qcfail"
     if alignment.is_supplementary and not parameters.include_supplementary:
         return "supplementary"
-    if alignment.mapping_quality < parameters.min_mapq:
-        return "low_mapq"
     query_start = alignment.query_alignment_start
     query_end = alignment.query_alignment_end
     if query_start is None or query_end is None:
@@ -1254,6 +1261,374 @@ def assign_hic_pairs_disk(
     return summary
 
 
+def _fast_v1_group_choice(
+    candidates, load, target_lengths, seed: int, read_id: str
+):
+    """Choose one existing dosage group without copying a pair to its siblings."""
+    ordered = tuple(sorted(candidates, key=group_sort_key))
+    ratios = {
+        group: load[group] / max(target_lengths[group], 1)
+        for group in ordered
+    }
+    minimum = min(ratios.values())
+    tied = [group for group in ordered if ratios[group] == minimum]
+    if len(tied) == 1:
+        return tied[0]
+    offset = zlib.crc32(f"{seed}\0{read_id}".encode()) % len(tied)
+    return tied[offset]
+
+
+def assign_hic_fast_v1(
+    bam_path: Path,
+    output_directory: Path,
+    model: GroupModel,
+    parameters: AssignmentParameters,
+    seed: int,
+    progress=None,
+    progress_every: int = 1_000_000,
+):
+    """Assign Hi-C pairs in one BAM pass using primary read1 and RNEXT.
+
+    This is the corrected v1 fast path.  It deliberately avoids read-keyed
+    evidence storage: the primary read1 record supplies both its own reference
+    and the primary mate reference (RNEXT).  A pair is written to exactly one
+    of the groups shared by those references.  Dosage/collapsed candidates are
+    balanced only among the groups already listed for their complete unitigs.
+    MAPQ is neither filtered nor used as a score.
+    """
+    output_directory.mkdir(parents=True, exist_ok=True)
+    groups = tuple(sorted(model.groups, key=group_sort_key))
+    read_id_paths = {
+        group: output_directory / f"{group}.read_ids.txt" for group in groups
+    }
+    handles = {group: path.open("w") for group, path in read_id_paths.items()}
+    stats = Counter()
+    basis_counts = Counter()
+    group_counts = Counter()
+    load = Counter()
+    started = time.monotonic()
+    try:
+        with pysam.AlignmentFile(str(bam_path), "rb") as bam:
+            reference_lengths = dict(zip(bam.references, bam.lengths))
+            target_lengths = group_target_lengths(model, reference_lengths)
+            group_by_bit = groups
+            group_bits = {
+                group: 1 << index for index, group in enumerate(group_by_bit)
+            }
+            unitig_masks = {
+                unitig: sum(group_bits[group] for group in assigned_groups)
+                for unitig, assigned_groups in model.unitig_groups.items()
+            }
+            reference_masks = tuple(
+                unitig_masks.get(reference, 0) for reference in bam.references
+            )
+            for alignment in bam.fetch(until_eof=True):
+                stats["alignment_records"] += 1
+                if not alignment.is_read1:
+                    stats["filtered_not_read1"] += 1
+                    continue
+                stats["read1_records"] += 1
+                if alignment.is_unmapped:
+                    stats["filtered_unmapped"] += 1
+                    continue
+                if alignment.mate_is_unmapped or alignment.next_reference_id < 0:
+                    stats["filtered_mate_unmapped"] += 1
+                    continue
+                if alignment.is_secondary:
+                    stats["filtered_secondary"] += 1
+                    continue
+                if alignment.is_supplementary:
+                    stats["filtered_supplementary"] += 1
+                    continue
+                if alignment.is_duplicate:
+                    stats["filtered_duplicate"] += 1
+                    continue
+                if alignment.is_qcfail:
+                    stats["filtered_qcfail"] += 1
+                    continue
+                query_start = alignment.query_alignment_start
+                query_end = alignment.query_alignment_end
+                if query_start is None or query_end is None:
+                    stats["filtered_missing_query_interval"] += 1
+                    continue
+                if query_end - query_start < parameters.min_alignment_length:
+                    stats["filtered_short_alignment"] += 1
+                    continue
+                if _alignment_identity(alignment) < parameters.min_identity:
+                    stats["filtered_low_identity"] += 1
+                    continue
+
+                mask1 = reference_masks[alignment.reference_id]
+                mask2 = reference_masks[alignment.next_reference_id]
+                if mask1 and mask2:
+                    candidate_mask = mask1 & mask2
+                    if not candidate_mask:
+                        stats["pairs_with_group_evidence"] += 1
+                        stats["unassigned"] += 1
+                        basis_counts["hic_mates_conflict"] += 1
+                        continue
+                    basis = (
+                        "hic_mates_concordant"
+                        if candidate_mask & (candidate_mask - 1) == 0
+                        else "hic_collapsed_pair_balanced"
+                    )
+                elif mask1 or mask2:
+                    candidate_mask = mask1 or mask2
+                    basis = (
+                        "hic_single_mate_group"
+                        if candidate_mask & (candidate_mask - 1) == 0
+                        else "hic_single_mate_collapsed_balanced"
+                    )
+                else:
+                    stats["non_group_pairs"] += 1
+                    continue
+
+                read_id = normalize_read_name(alignment.query_name)
+                if any(value in read_id for value in ("\t", "\n", "\r")):
+                    raise ValueError(
+                        f"Hi-C read ID contains a delimiter: {read_id!r}"
+                    )
+                stats["pairs_with_group_evidence"] += 1
+                if candidate_mask & (candidate_mask - 1):
+                    if parameters.collapsed_policy == "defer":
+                        stats["unassigned"] += 1
+                        basis_counts["hic_collapsed_pair_deferred"] += 1
+                        continue
+                    candidates = tuple(
+                        group_by_bit[index]
+                        for index in range(len(group_by_bit))
+                        if candidate_mask & (1 << index)
+                    )
+                    group = _fast_v1_group_choice(
+                        candidates, load, target_lengths, seed, read_id
+                    )
+                else:
+                    group = group_by_bit[candidate_mask.bit_length() - 1]
+                handles[group].write(read_id + "\n")
+                load[group] += 1
+                group_counts[group] += 1
+                basis_counts[basis] += 1
+                stats["assigned"] += 1
+                if (
+                    progress
+                    and stats["alignment_records"] % max(progress_every, 1) == 0
+                ):
+                    progress(
+                        stats["alignment_records"], None, started,
+                        f"assigned {stats['assigned']:,}",
+                    )
+    finally:
+        for handle in handles.values():
+            handle.close()
+
+    if progress:
+        progress(
+            stats["alignment_records"], stats["alignment_records"], started,
+            f"assigned {stats['assigned']:,}",
+        )
+    groups_summary = {
+        group: {
+            "pairs": group_counts[group],
+            "target_bp": target_lengths[group],
+            "pairs_per_target_bp": (
+                group_counts[group] / max(target_lengths[group], 1)
+            ),
+        }
+        for group in groups
+    }
+    summary = {
+        "backend": "fast-v1",
+        "bam": str(bam_path),
+        "bam_stats": dict(stats),
+        "assignments": {
+            "reads_with_group_evidence": stats["pairs_with_group_evidence"],
+            "assigned": stats["assigned"],
+            "unassigned": stats["unassigned"],
+            "basis_counts": dict(sorted(basis_counts.items())),
+            "groups": groups_summary,
+        },
+        "read_id_files": {
+            group: read_id_paths[group].name for group in groups
+        },
+        "semantics": {
+            "evidence_record": "primary_read1_with_RNEXT",
+            "mapq_filter": False,
+            "collapsed_unit": "complete_unitig",
+            "collapsed_assignment": "mutually_exclusive_existing_groups",
+        },
+    }
+    write_json(output_directory / "summary.json", summary)
+    return summary
+
+
+def _write_seqkit_mate_patterns(read_ids: Path, patterns: Path, mate: int):
+    rows = 0
+    with read_ids.open() as source, patterns.open("w") as destination:
+        for line in source:
+            read_id = line.rstrip("\n")
+            if not read_id:
+                continue
+            destination.write(read_id + "\n")
+            destination.write(f"{read_id}/{mate}\n")
+            rows += 1
+    return rows
+
+
+def _seqkit_grep_and_count(
+    input_path: Path, patterns: Path, output_path: Path, count_path: Path,
+    seqkit: str, pigz: str, gawk: str, threads: int,
+):
+    """Run seqkit grep, count FASTQ records in-stream, and compress once."""
+    seqkit_stderr = count_path.with_suffix(".seqkit.stderr")
+    gawk_stderr = count_path.with_suffix(".gawk.stderr")
+    pigz_stderr = count_path.with_suffix(".pigz.stderr")
+    processes = []
+    try:
+        with (
+            seqkit_stderr.open("wb") as seqkit_error,
+            gawk_stderr.open("wb") as gawk_error,
+            pigz_stderr.open("wb") as pigz_error,
+            output_path.open("wb") as output,
+        ):
+            first = subprocess.Popen(
+                [seqkit, "grep", "--quiet", "-j", str(threads),
+                 "-f", str(patterns), str(input_path)],
+                stdout=subprocess.PIPE, stderr=seqkit_error,
+            )
+            processes.append(first)
+            second = subprocess.Popen(
+                [gawk, f"{{print; if (NR % 4 == 0) n++}} END "
+                 f"{{print n+0 > \"{count_path}\"}}"],
+                stdin=first.stdout, stdout=subprocess.PIPE, stderr=gawk_error,
+            )
+            processes.append(second)
+            first.stdout.close()
+            third = subprocess.Popen(
+                [pigz, "-1", "-p", "1", "-n", "-c"],
+                stdin=second.stdout, stdout=output, stderr=pigz_error,
+            )
+            processes.append(third)
+            second.stdout.close()
+            codes = [process.wait() for process in processes]
+        if any(codes):
+            messages = []
+            for label, path, code in zip(
+                ("seqkit", "gawk", "pigz"),
+                (seqkit_stderr, gawk_stderr, pigz_stderr), codes,
+            ):
+                if code:
+                    messages.append(
+                        f"{label} exit={code}: "
+                        f"{path.read_text(errors='replace').strip()}"
+                    )
+            raise RuntimeError("; ".join(messages))
+        return int(count_path.read_text().strip())
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+        for path in (seqkit_stderr, gawk_stderr, pigz_stderr):
+            path.unlink(missing_ok=True)
+
+
+def dispatch_paired_fastq_fast_v1(
+    input1: Path,
+    input2: Path,
+    assignment_directory: Path,
+    groups,
+    output_directory: Path,
+    seqkit: str,
+    pigz: str,
+    gawk: str,
+    threads: int = 8,
+    jobs: int = 4,
+    progress=None,
+):
+    """Extract corrected-v1 Hi-C groups using read-name files and seqkit."""
+    groups = tuple(sorted(groups, key=group_sort_key))
+    assignment_summary = json.loads(
+        (assignment_directory / "summary.json").read_text()
+    )
+    expected = {
+        group: int(
+            assignment_summary["assignments"]["groups"][group]["pairs"]
+        )
+        for group in groups
+    }
+    output_directory.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    completed_pairs = 0
+
+    def extract_group(group):
+        read_ids = assignment_directory / f"{group}.read_ids.txt"
+        if not read_ids.exists():
+            raise FileNotFoundError(f"Missing fast-v1 read IDs: {read_ids}")
+        result = []
+        for mate, input_path in ((1, input1), (2, input2)):
+            patterns = output_directory / f".{group}.mate{mate}.patterns"
+            count_path = output_directory / f".{group}.mate{mate}.count"
+            output_path = output_directory / f"{group}.Hi-C.{mate}.fq.gz"
+            try:
+                rows = _write_seqkit_mate_patterns(read_ids, patterns, mate)
+                if rows != expected[group]:
+                    raise ValueError(
+                        f"Fast-v1 assignment count changed for {group}: "
+                        f"{rows} != {expected[group]}"
+                    )
+                if rows == 0:
+                    with gzip.open(output_path, "wb"):
+                        pass
+                    found = 0
+                else:
+                    found = _seqkit_grep_and_count(
+                        input_path, patterns, output_path, count_path,
+                        seqkit, pigz, gawk, threads,
+                    )
+                result.append(found)
+            finally:
+                patterns.unlink(missing_ok=True)
+                count_path.unlink(missing_ok=True)
+        if result[0] != result[1]:
+            raise ValueError(
+                f"Hi-C mate extraction count differs for {group}: "
+                f"{result[0]} != {result[1]}"
+            )
+        return group, result[0]
+
+    found = {}
+    with ThreadPoolExecutor(max_workers=min(jobs, max(len(groups), 1))) as executor:
+        futures = {executor.submit(extract_group, group): group for group in groups}
+        try:
+            for future in as_completed(futures):
+                group, count = future.result()
+                found[group] = count
+                completed_pairs += count
+                if progress:
+                    progress(
+                        completed_pairs, sum(expected.values()), started,
+                        f"groups {len(found)}/{len(groups)}",
+                    )
+        except Exception:
+            for future in futures:
+                future.cancel()
+            raise
+    missing = sum(max(expected[group] - found.get(group, 0), 0) for group in groups)
+    return {
+        "backend": "fast-v1-seqkit",
+        "input1": str(input1),
+        "input2": str(input2),
+        "requested_assigned_pairs": sum(expected.values()),
+        "written_pairs": sum(found.values()),
+        "missing_pairs": missing,
+        "missing_examples": [],
+        "group_written_pairs": found,
+        "full_input_scans_per_mate": len(groups),
+        "tools": {"seqkit": seqkit, "gawk": gawk, "pigz": pigz},
+        "threads_per_seqkit": threads,
+        "concurrent_groups": jobs,
+    }
+
+
 def _open_text(path: Path, mode: str, compresslevel: int = 1):
     if path.suffix == ".gz":
         return gzip.open(path, mode + "t", compresslevel=compresslevel)
@@ -1450,11 +1825,13 @@ def dispatch_single_fastq_database(
                 group = assignments.get(record.name)
                 if group is None:
                     continue
-                mean_quality = (
-                    sum(ord(value) - 33 for value in record.quality)
-                    / len(record.quality)
-                    if record.quality else 0.0
-                )
+                mean_quality = 0.0
+                if min_mean_quality > 0:
+                    mean_quality = (
+                        sum(ord(value) - 33 for value in record.quality)
+                        / len(record.quality)
+                        if record.quality else 0.0
+                    )
                 disposition = "written"
                 if len(record.sequence) < min_length or mean_quality < min_mean_quality:
                     filtered += 1
@@ -1482,6 +1859,7 @@ def dispatch_single_fastq_database(
     connection.commit()
     connection.close()
     return {
+        "backend": "python",
         "input": str(input_path), "input_records": records,
         "requested_assigned_reads": requested, "written_reads": written,
         "filtered_assigned_reads": filtered, "missing_reads": missing,
@@ -1492,6 +1870,233 @@ def dispatch_single_fastq_database(
         "full_input_scans": 1,
         "filters": {"min_length": min_length, "min_mean_quality": min_mean_quality},
     }
+
+
+def _write_fast_assignment_mapping(database_path, groups, path):
+    groups = tuple(groups)
+    placeholders = ",".join("?" for _ in groups)
+    connection = _sqlite_connect(database_path)
+    rows = 0
+    try:
+        with path.open("w") as handle:
+            for read_id, group in connection.execute(
+                f"SELECT read_id, group_name FROM decisions "
+                f"WHERE status='assigned' AND group_name IN ({placeholders})",
+                groups,
+            ):
+                if any(value in read_id for value in ("\t", "\n", "\r")):
+                    raise ValueError(f"Assignment read ID contains a delimiter: {read_id!r}")
+                if group not in groups:
+                    raise ValueError(f"Assignment has an unexpected group: {group}")
+                handle.write(f"{read_id}\t{group}\n")
+                rows += 1
+    finally:
+        connection.close()
+    return rows
+
+
+def _parse_fast_demux_summary(path, groups):
+    values = {}
+    group_values = {group: 0 for group in groups}
+    with path.open() as handle:
+        reader = csv.reader(handle, delimiter="\t")
+        header = next(reader, None)
+        if header != ["metric", "value"]:
+            raise ValueError(f"Malformed fast extraction summary: {path}")
+        for row in reader:
+            if len(row) != 2:
+                raise ValueError(f"Malformed fast extraction summary row: {row}")
+            if row[0].startswith("group_reads:"):
+                group = row[0].split(":", 1)[1]
+                if group not in group_values:
+                    raise ValueError(f"Unexpected group in extraction summary: {group}")
+                group_values[group] = int(row[1])
+            else:
+                values[row[0]] = row[1]
+    integer_fields = (
+        "input_records", "requested_assigned_reads", "written_reads",
+        "filtered_assigned_reads", "missing_reads", "duplicate_errors",
+        "parse_errors",
+    )
+    for field in integer_fields:
+        if field not in values:
+            raise ValueError(f"Fast extraction summary is missing {field}")
+        values[field] = int(values[field])
+    values["missing_examples"] = list(
+        filter(None, values.get("missing_examples", "").split(","))
+    )
+    values["group_written_reads"] = group_values
+    return values
+
+
+def dispatch_single_fastq_seqkit(
+    input_path: Path,
+    assignment_database: Path,
+    groups,
+    output_directory: Path,
+    suffix: str,
+    seqkit: str,
+    pigz: str,
+    gawk: str,
+    threads: int = 8,
+    min_length: int = 0,
+    min_mean_quality: float = 0.0,
+    progress=None,
+    progress_every: int = 1_000_000,
+):
+    """Dispatch one FASTQ scan with seqkit, gawk, FIFOs, and parallel pigz."""
+    groups = tuple(sorted(groups, key=group_sort_key))
+    if not groups:
+        raise ValueError("At least one output group is required")
+    output_directory.mkdir(parents=True, exist_ok=True)
+    workspace = Path(
+        tempfile.mkdtemp(prefix=".seqkit_demux.", dir=output_directory)
+    )
+    mapping_path = workspace / "assignments.tsv"
+    groups_path = workspace / "groups.tsv"
+    summary_path = workspace / "summary.tsv"
+    seqkit_stderr_path = workspace / "seqkit.stderr"
+    awk_script = Path(__file__).with_name("phase_reads_demux.awk")
+    if not awk_script.exists():
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise FileNotFoundError(f"Missing PHap demultiplexer: {awk_script}")
+
+    fifos = {}
+    outputs = {}
+    try:
+        for group in groups:
+            fifo = workspace / f"{group}.fifo"
+            os.mkfifo(fifo)
+            fifos[group] = fifo
+            outputs[group] = output_directory / f"{group}.{suffix}.fq.gz"
+        with groups_path.open("w") as handle:
+            for group in groups:
+                handle.write(f"{group}\t{fifos[group]}\n")
+        requested = _write_fast_assignment_mapping(
+            assignment_database, groups, mapping_path
+        )
+    except Exception:
+        shutil.rmtree(workspace, ignore_errors=True)
+        raise
+
+    def compress(group):
+        with fifos[group].open("rb", buffering=0) as source, outputs[group].open("wb") as target:
+            completed = subprocess.run(
+                [pigz, "-1", "-p", "1", "-n", "-c"],
+                stdin=source, stdout=target, stderr=subprocess.PIPE,
+            )
+        if completed.returncode != 0:
+            message = completed.stderr.decode(errors="replace").strip()
+            raise RuntimeError(
+                f"pigz failed for {group} with exit status "
+                f"{completed.returncode}: {message}"
+            )
+
+    def release_blocked_fifo_readers():
+        """Unblock compressor threads if gawk exits before opening a FIFO."""
+        for fifo in fifos.values():
+            try:
+                descriptor = os.open(fifo, os.O_WRONLY | os.O_NONBLOCK)
+            except OSError:
+                continue
+            os.close(descriptor)
+
+    seqkit_command = [seqkit, "fx2tab", "--quiet", "-j", str(threads)]
+    seqkit_command.append(str(input_path))
+    gawk_command = [
+        gawk,
+        "-v", f"mapping_file={mapping_path}",
+        "-v", f"groups_file={groups_path}",
+        "-v", f"summary_file={summary_path}",
+        "-v", f"min_length={min_length}",
+        "-v", f"min_quality={min_mean_quality}",
+        "-v", f"progress_every={progress_every}",
+        "-f", str(awk_script),
+    ]
+    started = time.monotonic()
+    gawk_messages = []
+    seqkit_process = gawk_process = None
+    try:
+        with seqkit_stderr_path.open("w") as seqkit_stderr:
+            seqkit_process = subprocess.Popen(
+                seqkit_command, stdout=subprocess.PIPE, stderr=seqkit_stderr
+            )
+            gawk_process = subprocess.Popen(
+                gawk_command, stdin=seqkit_process.stdout,
+                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True,
+            )
+            seqkit_process.stdout.close()
+            with ThreadPoolExecutor(max_workers=len(groups)) as executor:
+                futures = [executor.submit(compress, group) for group in groups]
+                for line in gawk_process.stderr:
+                    message = line.rstrip("\n")
+                    if message.startswith("PHAP_PROGRESS\t"):
+                        processed = int(message.split("\t", 1)[1])
+                        if progress:
+                            progress(processed, None, started)
+                    elif message:
+                        gawk_messages.append(message)
+                gawk_process.stderr.close()
+                gawk_code = gawk_process.wait()
+                seqkit_code = seqkit_process.wait()
+                if gawk_code != 0 or seqkit_code != 0:
+                    release_blocked_fifo_readers()
+                compression_errors = []
+                for future in futures:
+                    try:
+                        future.result()
+                    except Exception as exc:
+                        compression_errors.append(str(exc))
+        if seqkit_code != 0:
+            error = seqkit_stderr_path.read_text(errors="replace").strip()
+            raise RuntimeError(
+                f"seqkit fx2tab failed with exit status {seqkit_code}: {error}"
+            )
+        if gawk_code != 0:
+            raise RuntimeError(
+                f"gawk FASTQ demultiplexing failed with exit status {gawk_code}: "
+                + "; ".join(gawk_messages[-10:])
+            )
+        if compression_errors:
+            raise RuntimeError("; ".join(compression_errors))
+        summary = _parse_fast_demux_summary(summary_path, groups)
+        if summary["requested_assigned_reads"] != requested:
+            raise ValueError(
+                "Fast extraction mapping count changed during demultiplexing: "
+                f"{requested} != {summary['requested_assigned_reads']}"
+            )
+        if summary["duplicate_errors"] or summary["parse_errors"]:
+            raise ValueError(
+                "Fast extraction detected duplicate IDs or malformed FASTQ records"
+            )
+        if progress:
+            progress(summary["input_records"], summary["input_records"], started)
+        return {
+            "backend": "seqkit",
+            "input": str(input_path),
+            **{
+                key: summary[key]
+                for key in (
+                    "input_records", "requested_assigned_reads", "written_reads",
+                    "filtered_assigned_reads", "missing_reads", "missing_examples",
+                    "group_written_reads",
+                )
+            },
+            "full_input_scans": 1,
+            "filters": {
+                "min_length": min_length,
+                "min_mean_quality": min_mean_quality,
+            },
+            "tools": {"seqkit": seqkit, "gawk": gawk, "pigz": pigz},
+            "threads": threads,
+            "fastq_plus_line": "normalized_to_plus",
+        }
+    finally:
+        for process in (gawk_process, seqkit_process):
+            if process is not None and process.poll() is None:
+                process.terminate()
+        shutil.rmtree(workspace, ignore_errors=True)
 
 
 def dispatch_paired_fastq_database(
@@ -1551,6 +2156,7 @@ def dispatch_paired_fastq_database(
     connection.commit()
     connection.close()
     return {
+        "backend": "python-paired",
         "input1": str(input1), "input2": str(input2), "input_pairs": pairs,
         "requested_assigned_pairs": requested, "written_pairs": written,
         "missing_pairs": missing, "missing_examples": examples,
