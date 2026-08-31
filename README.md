@@ -30,6 +30,13 @@ See [V2_DEVELOPMENT_VALIDATION.md](V2_DEVELOPMENT_VALIDATION.md) for the
 separate development-data, code, parameters, result-directory, and validation
 boundary record for the current potato tests.
 
+The complete current-potato validation scripts are
+[`examples/run_cluster_full_potato_v2.sh`](examples/run_cluster_full_potato_v2.sh)
+and
+[`examples/run_phase_reads_full_potato_v2.sh`](examples/run_phase_reads_full_potato_v2.sh).
+They use new output directories and stop rather than overwriting an existing
+run.
+
 See [ALLELIC_TABLE_V2.md](ALLELIC_TABLE_V2.md) for the algorithm, thresholds,
 output interpretation, and validation strategy.
 

@@ -219,3 +219,17 @@ scaffold-only 真实数据测试。
 - variant-based read phasing。
 
 因此该分支是可供测试的 v2 开发版本，而不是已经完成全部生产验证的通用版本。
+
+## 8. 全流程复测脚本
+
+当前马铃薯数据的完整复测脚本已经随代码保存：
+
+1. [`examples/run_cluster_full_potato_v2.sh`](examples/run_cluster_full_potato_v2.sh)
+   从 allelic table 运行至 `05.rescue`，并检查最终48个 group FASTA。
+2. [`examples/run_phase_reads_full_potato_v2.sh`](examples/run_phase_reads_full_potato_v2.sh)
+   使用前一步的最终 group 文件，运行 HiFi/ONT/Hi-C assignment、FASTQ extraction、
+   hifiasm 和48个 HapHiC scaffold，并检查48个结果和 checkpoint。
+
+两个脚本均拒绝写入非空输出目录。第二个脚本需要在包含 hifiasm、HapHiC 及其依赖
+工具的环境中运行；其默认资源是4个并发任务、每任务10线程、Hi-C seqkit每任务4线程。
+若更改资源或原始数据路径，应创建新的输出目录并将实际命令与 manifest 一并保存。
