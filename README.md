@@ -26,6 +26,10 @@ See [UPGRADE_RECORD.md](UPGRADE_RECORD.md) for the consolidated Chinese record
 of code changes, retained and rejected algorithm experiments, current validation
 results, and the recommended next run.
 
+See [V2_DEVELOPMENT_VALIDATION.md](V2_DEVELOPMENT_VALIDATION.md) for the
+separate development-data, code, parameters, result-directory, and validation
+boundary record for the current potato tests.
+
 See [ALLELIC_TABLE_V2.md](ALLELIC_TABLE_V2.md) for the algorithm, thresholds,
 output interpretation, and validation strategy.
 

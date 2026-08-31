@@ -393,6 +393,9 @@ reads 深度均衡，不代表当前最新版聚类算法的最终生物学结�
 
 ## 16. phase_reads当前真实数据验证边界（2026-08-31）
 
+完整的开发输入、代码、参数、结果目录和验证边界已独立整理在
+[`V2_DEVELOPMENT_VALIDATION.md`](V2_DEVELOPMENT_VALIDATION.md)。
+
 - 58项自动化测试全部通过。
 - 马铃薯48个groups的HiFi/ONT assignment、FASTQ extraction和hifiasm组装均
   已完成，48个组装结果均已运行yak后验评估。
