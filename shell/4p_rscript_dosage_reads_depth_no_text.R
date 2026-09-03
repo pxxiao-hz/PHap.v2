@@ -18,7 +18,13 @@ option_list <- list(
               dest="input_file"),
   make_option(c("-o", "--output"), type="character", default="plot.pdf",
               help="Output filename for the plot [Default: plot.pdf]",
-              dest="output_file")
+              dest="output_file"),
+  make_option(c("-p", "--ploidy"), type="integer", default=4,
+              help="Expected haplotype count [Default: 4]",
+              dest="ploidy"),
+  make_option(c("-d", "--base-depth"), type="double", default=28,
+              help="Estimated single-copy depth [Default: 28]",
+              dest="base_depth")
 )
 
 # 解析命令行参数
@@ -65,7 +71,7 @@ p <- ggplot(data = depth, aes(x = Depth)) +
   # egg 的一个主题格式
   theme_article() + 
   # 显示 x 轴的范围
-  xlim(0,150) + 
+  xlim(0, (opts$ploidy + 1.5) * opts$base_depth) +
   # 横纵坐标标签
   labs(x="Sequencing depth", y="Count") + 
   # haplotig

@@ -18,13 +18,7 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
 
-
-DOSAGE_BY_TYPE = {
-    "haplotig": 1,
-    "diplotig": 2,
-    "triplotig": 3,
-    "tetraplotig": 4,
-}
+from dosage import dosage_from_contig_type
 
 
 def parse_fasta(path: Path, motif: str, flank: Optional[int]):
@@ -91,7 +85,7 @@ def parse_contig_types(path: Path, unitigs, unknown_policy: str):
     missing = sorted(set(unitigs) - set(types))
     unsupported = sorted(
         unitig for unitig in unitigs
-        if unitig in types and types[unitig] not in DOSAGE_BY_TYPE
+        if unitig in types and dosage_from_contig_type(types[unitig]) is None
     )
     if unknown_policy == "error" and (missing or unsupported):
         examples = missing[:3] + unsupported[:3]
@@ -1306,7 +1300,16 @@ def run(args):
         args.contig_type, records, args.unknown_dosage_policy
     )
     args.inferred_dosage = inferred_dosage
-    dosage = {unitig: DOSAGE_BY_TYPE[contig_types[unitig]] for unitig in records}
+    dosage = {
+        unitig: dosage_from_contig_type(contig_types[unitig])
+        for unitig in records
+    }
+    over_ploidy = sorted(unitig for unitig, value in dosage.items() if value > args.ploidy)
+    if over_ploidy:
+        raise ValueError(
+            f"Dosage exceeds ploidy for {len(over_ploidy)} chromosome unitigs: "
+            + ", ".join(over_ploidy[:5])
+        )
     seed_assignments, seed_chromosome = parse_seed_clusters(
         args.clusters_file, records, dosage, args.ploidy
     )

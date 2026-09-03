@@ -8,13 +8,15 @@
 
 # 显示帮助文档
 show_help() {
-    echo "Usage: $0 -g genome_file -i hifi_file -t threads [-o output_directory]"
+    echo "Usage: $0 -g genome_file -i hifi_file -t threads [-o output_directory] [-p ploidy] [-d single_copy_depth]"
     echo ""
     echo "Options:"
     echo "  -g genome_file      Path to the genome file"
     echo "  -i hifi_file        Path to the HiFi fastq file"
     echo "  -t threads          Number of threads to use (default: 30)"
     echo "  -o output_directory Directory to save output files (default: current directory)"
+    echo "  -p ploidy          Expected haplotype count (default: 4)"
+    echo "  -d single_copy_depth Estimated haplotig depth used for plotting (default: 28)"
     echo ""
     echo " dosage.analysis.contig.type.identified.py 用来识别 contig 类型 "
     echo " grep -v \"#\" aln.sort.clean.pandepth.win.stat > temp && mv temp aln.sort.clean.pandepth.win.stat"
@@ -24,13 +26,15 @@ show_help() {
 # 默认设置
 output_directory="."
 threads=30
+ploidy=4
+base_depth=28
 
 # 获取脚本自身目录路径
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 rscript_path="$script_dir/4p_rscript_dosage_reads_depth_no_text.R"
 
 # 解析命令行参数
-while getopts "hg:i:t:o:" opt; do
+while getopts "hg:i:t:o:p:d:" opt; do
     case "$opt" in
         h)
             show_help
@@ -47,6 +51,12 @@ while getopts "hg:i:t:o:" opt; do
             ;;
         o)
             output_directory=$OPTARG
+            ;;
+        p)
+            ploidy=$OPTARG
+            ;;
+        d)
+            base_depth=$OPTARG
             ;;
         \?)
             show_help
@@ -82,6 +92,6 @@ nohup time -v pandepth -i "$output_directory/aln.sort.clean.bam" -w 10000 -a -o 
 
 zcat "$output_directory/aln.sort.clean.pandepth.win.stat.gz" | grep -v RegionLength | cut -f 8 | sed 's/MeanDepth/Depth/g' > "$output_directory/dosage.win10000.txt"
 
-$rscript_path -i "$output_directory/dosage.win10000.txt" -o "$output_directory/dosage.win10000"
+$rscript_path -i "$output_directory/dosage.win10000.txt" -o "$output_directory/dosage.win10000" -p "$ploidy" -d "$base_depth"
 
 echo "Done!^-^"

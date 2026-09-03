@@ -25,13 +25,8 @@ from typing import Dict, Iterable, Iterator, Optional, Sequence, TextIO, Tuple
 
 import pysam
 
+from dosage import dosage_from_contig_type
 
-DOSAGE_BY_TYPE = {
-    "haplotig": 1,
-    "diplotig": 2,
-    "triplotig": 3,
-    "tetraplotig": 4,
-}
 GROUP_PATTERN = re.compile(r"^(.+)_group([1-9][0-9]*)$")
 
 
@@ -228,7 +223,7 @@ def validate_group_dosage(
     examples = defaultdict(list)
     for unitig, assigned_groups in model.unitig_groups.items():
         contig_type = contig_types.get(unitig)
-        dosage = DOSAGE_BY_TYPE.get(contig_type)
+        dosage = dosage_from_contig_type(contig_type)
         if dosage is None:
             category = "missing" if contig_type is None else "unsupported"
             counts[category] += 1

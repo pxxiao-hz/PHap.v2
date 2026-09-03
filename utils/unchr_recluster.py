@@ -16,13 +16,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Optional
 
+from dosage import dosage_from_contig_type
 
-DOSAGE_BY_TYPE = {
-    "haplotig": 1,
-    "diplotig": 2,
-    "triplotig": 3,
-    "tetraplotig": 4,
-}
 GROUP_PATTERN = re.compile(r"^(.+)_group([0-9]+)$")
 
 
@@ -138,7 +133,7 @@ def candidate_dosages(records, contig_types, ploidy, policy):
     unsupported = {}
     for unitig in records:
         contig_type = contig_types.get(unitig)
-        value = DOSAGE_BY_TYPE.get(contig_type)
+        value = dosage_from_contig_type(contig_type)
         reason = None
         if contig_type is None:
             reason = "missing_contig_type"

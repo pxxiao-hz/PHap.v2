@@ -38,6 +38,8 @@ downstream haplotype groups.
 7. Sum dosage in every interval. When dosage exceeds ploidy, retain a subset
    only if the best dosage-valid solution exceeds the second-best solution by
    the configured confidence margin. Otherwise omit the interval.
+   Historical type names through `hexaplotig` and generic integer labels such
+   as `dosage_7` are parsed through the shared dosage model.
 8. Merge adjacent intervals only when their selected unitig set is identical.
 9. For every emitted pair, separately calculate the union-aware overlap of its
    accepted projection blocks. A large table overlap can therefore be

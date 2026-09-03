@@ -20,9 +20,9 @@ They are not silently deleted and are not guessed into a haplotype by default.
 3. Review all other seeds using chromosome Hi-C alone. A strong contradictory
    result changes the groups; an inconclusive result retains the original
    groups by default but is not allowed to propagate uncertainty.
-4. Convert haplotig, diplotig, triplotig, and tetraplotig types to dosages one
-   through four. Missing types can stop the run or be explicitly recorded as
-   inferred haplotigs.
+4. Convert supported names or generic `dosage_N` labels to positive integer
+   dosages up to the configured ploidy. Missing or invalid types can stop the
+   run or be explicitly recorded as inferred haplotigs.
 5. Load only Hi-C pairs whose endpoints occur in the chromosome FASTA. The
    default divides each count by the product of endpoint dosages; the public
    `--hic_link_normalization raw` option retains raw read-pair counts.
@@ -37,7 +37,7 @@ They are not silently deleted and are not guessed into a haplotype by default.
    times (equivalent to complete recluster runs 2 through 5), stopping early
    when no group changes. Repeated states are detected and reported as an
    oscillation instead of being silently accepted.
-10. Assign tetraplotigs to all four groups by dosage even without Hi-C.
+10. Assign every full-dosage unitig to all configured groups even without Hi-C.
 11. Validate fixed-seed preservation, exact dosage, unique memberships, and the
    assigned/unassigned input partition before replacing outputs.
 12. Read chromosome-local allelic-table rows after Hi-C refinement. Treat
@@ -68,7 +68,7 @@ They are not silently deleted and are not guessed into a haplotype by default.
 | `--recluster_reviewed_seed_fallback` | `retain` | Retain an original seed assignment when Hi-C review is inconclusive; `defer` removes it from final groups |
 
 The selected-link fraction is not filtered by default. A valid haplotig can
-have background links to all four groups while retaining a clear normalized
+have background links to all groups while retaining a clear normalized
 density advantage for one group.
 
 The standalone utility uses `--hic-link-normalization`. Legacy TSV column

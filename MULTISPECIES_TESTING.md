@@ -2,10 +2,12 @@
 
 ## Release status
 
-Branch: `testing/v2-multispecies-20260823`
+Development branch: `feature/general-ploidy-support`
 
-This is a validation branch. All 58 automated tests pass. On real
-autotetraploid potato data, all 48 groups have completed HiFi/ONT assignment,
+This is a validation branch. All 66 automated tests pass. Synthetic tests cover
+triploid and pentaploid clustering, pentaplotig allelic-table input, and
+hexaploid clustering, reassignment, rescue, and read-phasing dosage validation.
+On real autotetraploid potato data, all 48 groups have completed HiFi/ONT assignment,
 extraction, reassembly, and yak evaluation, and all 48 paired Hi-C group FASTQs
 have been extracted. HapHiC scaffolding has completed on two selected groups;
 full 48-group scaffolding and Juicebox review were not run.
@@ -19,8 +21,8 @@ evaluate accuracy.
 - Development and current real-data calibration focus on autotetraploid
   potato.
 - `--top_n` specifies expected haplotype count and `--chr_num` specifies the
-  chromosome count, but general triploid, hexaploid, and higher-ploidy support
-  is not yet certified.
+  basic chromosome count. Dynamic integer ploidy is implemented, but biological
+  triploid, pentaploid, hexaploid, and higher-ploidy runs are not yet certified.
 - Thresholds were not calibrated on diverse genome sizes, repeat content,
   heterozygosity levels, or sequencing depths.
 - `phase_reads` has extensive potato validation, but only two groups have been

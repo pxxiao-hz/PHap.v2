@@ -2,7 +2,8 @@
 
 > [!WARNING]
 > This branch is a **testing release**, not a stable production release.
-> All 58 automated tests pass. On autotetraploid potato, all 48 groups have
+> All 66 automated tests pass, including synthetic triploid, pentaploid, and
+> hexaploid dosage paths. On autotetraploid potato, all 48 groups have
 > completed HiFi/ONT read assignment, extraction, reassembly, and yak
 > evaluation; Hi-C extraction is also complete for all 48 groups. HapHiC
 > scaffolding has been validated on two selected groups, but not yet on all 48.
@@ -21,6 +22,9 @@ clustering or read assignment; it may only be used after a run for evaluation.
 See [MULTISPECIES_TESTING.md](MULTISPECIES_TESTING.md) before testing another
 species. It records the current validation boundary, required metadata, a
 small-scale testing strategy, and the files needed for a useful bug report.
+
+See [GENERAL_PLOIDY.md](GENERAL_PLOIDY.md) for dosage labels, depth
+classification, non-tetraploid commands, output naming, and required QC.
 
 See [UPGRADE_RECORD.md](UPGRADE_RECORD.md) for the consolidated Chinese record
 of code changes, retained and rejected algorithm experiments, current validation
@@ -168,13 +172,11 @@ run HapHiC directly from those existing results. This mode supports
 it does not require BAM inputs or `--contig-type`.
 
 ## Note
-**PHap** is currently developed and tested for _haplotype-resolved
-telomere-to-telomere (T2T) genome assembly_ in **autotetraploid genomes**, with
-a primary focus on potato (_Solanum tuberosum_). General ploidy support is a
-planned upgrade; the current workflow should not be assumed to support
-triploid, hexaploid, or other ploidies without validation and code changes.
 
-`--top_n` and `--chr_num` make basic species configuration possible, but they
-do not by themselves prove that every downstream algorithm is ploidy-generic.
-Testing other species is encouraged on this branch, with results reported as
-described in [MULTISPECIES_TESTING.md](MULTISPECIES_TESTING.md).
+PHap now implements integer dosage and dynamic group counts for ploidies of at
+least two. Synthetic tests cover non-tetraploid paths through the v2 workflow.
+Real-data development and end-to-end calibration remain focused on
+autotetraploid potato (_Solanum tuberosum_), so another species or ploidy must
+still be treated as experimental and validated as described in
+[GENERAL_PLOIDY.md](GENERAL_PLOIDY.md) and
+[MULTISPECIES_TESTING.md](MULTISPECIES_TESTING.md).

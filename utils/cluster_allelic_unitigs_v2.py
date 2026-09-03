@@ -10,6 +10,7 @@ import json
 import math
 import os
 import pickle
+import re
 import shutil
 import sys
 import tempfile
@@ -19,13 +20,7 @@ from pathlib import Path
 
 from typing import Optional
 
-
-DOSAGE_BY_TYPE = {
-    "haplotig": 1,
-    "diplotig": 2,
-    "triplotig": 3,
-    "tetraplotig": 4,
-}
+from dosage import dosage_from_contig_type
 
 
 class UnsatisfiableConstraintComponent(ValueError):
@@ -152,9 +147,9 @@ def parse_allelic_table(path: Path, contig_types, ploidy: int):
             total_dosage = 0
             for unitig in unitigs:
                 contig_type = contig_types.get(unitig)
-                if contig_type not in DOSAGE_BY_TYPE:
+                dosage = dosage_from_contig_type(contig_type)
+                if dosage is None:
                     raise ValueError(f"Missing or invalid dosage type for {unitig}: {contig_type}")
-                dosage = DOSAGE_BY_TYPE[contig_type]
                 if dosage > ploidy:
                     raise ValueError(f"Dosage for {unitig} exceeds ploidy")
                 total_dosage += dosage
@@ -1680,7 +1675,8 @@ def write_outputs(
                 handle.write(f"group{group}\t{len(members)}\t{' '.join(members)}\n")
 
         padded_length = max(len(members) for members in group_units)
-        with (temporary_directory / "g1g2g3g4.txt").open("w") as handle:
+        combined_stem = "g1g2g3g4" if args.ploidy == 4 else "all_groups"
+        with (temporary_directory / f"{combined_stem}.txt").open("w") as handle:
             handle.write("\t".join(f"g{group + 1}" for group in range(args.ploidy)) + "\n")
             for row_number in range(padded_length):
                 handle.write(
@@ -1690,7 +1686,7 @@ def write_outputs(
                     )
                     + "\n"
                 )
-        with (temporary_directory / "g1g2g3g4.fa").open("w") as handle:
+        with (temporary_directory / f"{combined_stem}.fa").open("w") as handle:
             for group, members in enumerate(group_units, 1):
                 for unitig in members:
                     handle.write(f">g{group}_{unitig}\n{sequences[unitig]['sequence']}\n")
@@ -2107,12 +2103,14 @@ def write_outputs(
         for old_name in (
             "full.links.txt",
             "flank.links.txt",
+            "all_groups.txt" if args.ploidy == 4 else "g1g2g3g4.txt",
+            "all_groups.fa" if args.ploidy == 4 else "g1g2g3g4.fa",
         ):
             old_path = output_directory / old_name
             if old_path.exists():
                 old_path.unlink()
-        for old_path in output_directory.glob("g[1-4].*"):
-            if old_path.name not in generated:
+        for old_path in output_directory.glob("g*.*"):
+            if re.fullmatch(r"g[1-9][0-9]*\.(?:fa|txt)", old_path.name) and old_path.name not in generated:
                 old_path.unlink()
         for path in temporary_directory.iterdir():
             os.replace(path, output_directory / path.name)
@@ -2190,7 +2188,10 @@ def run(args):
             f"{len(missing_fasta)} table unitigs are missing from chromosome FASTA: "
             + ", ".join(missing_fasta[:5])
         )
-    dosage = {unitig: DOSAGE_BY_TYPE[contig_types[unitig]] for unitig in table_units}
+    dosage = {
+        unitig: dosage_from_contig_type(contig_types[unitig])
+        for unitig in table_units
+    }
     lengths = {unitig: sequences[unitig]["length"] for unitig in table_units}
     direct_projection_overlap_bp = parse_allelic_pair_evidence(
         args.allelic_pairs, chromosome, table_units

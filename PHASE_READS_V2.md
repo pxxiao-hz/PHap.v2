@@ -28,7 +28,8 @@ assigned mutually exclusively, and no Hi-C evidence SQLite is created. The
 older detailed Hi-C pair-evidence implementation remains available through
 `--hic-assignment-backend sqlite`.
 
-All 58 automated tests pass. Real autotetraploid potato data have completed
+All 66 automated tests pass, including six-group dosage validation. Real
+autotetraploid potato data have completed
 HiFi/ONT assignment, extraction, and hifiasm reassembly for all 48 groups;
 all 48 assemblies have also been evaluated with yak. Corrected fast-v1 Hi-C
 assignment and paired FASTQ extraction completed for all 48 groups. The

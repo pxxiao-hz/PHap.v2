@@ -18,13 +18,7 @@ from dataclasses import dataclass, replace
 from itertools import combinations
 from pathlib import Path
 
-
-KNOWN_DOSAGE = {
-    "haplotig": 1,
-    "diplotig": 2,
-    "triplotig": 3,
-    "tetraplotig": 4,
-}
+from dosage import dosage_from_contig_type
 
 
 @dataclass(frozen=True)
@@ -452,14 +446,19 @@ def build_projections(records, metrics, contig_types, args):
 
     for (target, unitig), alignments in sorted(records.items()):
         raw_type = contig_types.get(unitig, "unknown")
-        if raw_type not in KNOWN_DOSAGE:
+        parsed_dosage = dosage_from_contig_type(raw_type)
+        if parsed_dosage is not None and parsed_dosage > args.ploidy:
+            rejected.append((target, unitig, "dosage_exceeds_ploidy", raw_type))
+            continue
+        if parsed_dosage is None:
             if args.unknown_dosage_policy == "exclude":
                 rejected.append((target, unitig, "unknown_dosage_type", raw_type))
                 continue
             contig_type = "haplotig"
+            dosage = 1
         else:
             contig_type = raw_type
-        dosage = KNOWN_DOSAGE[contig_type]
+            dosage = parsed_dosage
         metric = metrics[(target, unitig)]
         metric["query_length"] = alignments[0].query_length
 
@@ -1246,6 +1245,8 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    if args.ploidy < 2:
+        raise ValueError("--ploidy must be at least two")
     if args.min_over_capacity_pair_overlap < 0:
         raise ValueError("--min-over-capacity-pair-overlap must be non-negative")
     if not 0 <= args.min_over_capacity_pair_short_coverage <= 1:

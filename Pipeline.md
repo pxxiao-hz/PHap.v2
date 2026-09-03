@@ -11,15 +11,19 @@ hifiasm -o potato4.hifi.ont.asm -t64 \
 ```
 ## 2. Dosage analysis
 * By mapping high accuracy HiFi reads, identify collapsed unitigs based on the alignment depth.
-1. Obtain hifi alignment depth
+1. Obtain HiFi alignment depth. Supply the expected ploidy and estimated
+   single-copy depth when plotting a non-default dataset.
 ```shell
-px_shell_dosage.sh -g potato4.hifi.ont.asm.bp.p_utg.gfa.fa -i potato4.hifi.fastq.gz
+px_shell_dosage.sh -g p_utg.fa -i hifi.fastq.gz -p 6 -d 21
 ```
 ![|400](https://bioin-1320274504.cos.ap-nanjing.myqcloud.com/images/dosage.win10000.jpg)
 2. Identify unitig type
-* Based on alignment depth, classify unitigs, for example: haplotigs ([0, 45X]), diplotigs ([45X, 74X]), triplotigs ([74X, 103X]), tetraplotigs ([103X, 132X]), and replotigs (>= 132X) for replotigs.
+* Set `--base-depth` from the empirical single-copy peak. Dosage classes use
+  half-copy boundaries up to `--ploidy`; higher depths are marked `replotig`.
 ```
-python dosage.analysis.contig.type.identified.py --input_file aln.sort.clean.pandepth.win.stat.txt --pandepth
+python dosage.analysis.contig.type.identified.py \
+  --input_file aln.sort.clean.pandepth.win.stat.txt --pandepth \
+  --ploidy 6 --base-depth 21
 
 # Main file: contig_depth.txt
 ```

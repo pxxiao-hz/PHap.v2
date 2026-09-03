@@ -650,7 +650,10 @@ def parse_arguments():
     allelic_table = parser.add_argument_group('>>> Allelic table generated')
     allelic_table.add_argument("--bin_size", type=int, default=100000, help="Bin size [100000]")
     allelic_table.add_argument('--chr_num', type=int, default=12, help='The number of chromosomes [12]')
-    allelic_table.add_argument('--top_n', type=int, default=4, help='The number of haplotypes, for example, tetraploid is 4 [4]')
+    allelic_table.add_argument(
+        '--top_n', type=int, default=4,
+        help='Expected haplotype count/ploidy, for example triploid=3 and hexaploid=6 [4]'
+    )
     allelic_table.add_argument('--search_range', type=int, default=20, help='Search range [20]')
     allelic_table.add_argument('--min_identity', type=float, default=0.90)
     allelic_table.add_argument('--min_alignment_mapq', type=int, default=20)
@@ -847,6 +850,8 @@ def parse_arguments():
 
 def main():
     args = parse_arguments()
+    if args.top_n < 2:
+        raise SystemExit('--top_n must be at least two')
 
     script_realpath = os.path.dirname(os.path.realpath(__file__))
     utils_realpath = os.path.join(script_realpath, '..', 'utils')

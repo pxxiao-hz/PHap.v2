@@ -29,8 +29,10 @@ chromosome.
    a chromosome margin, and the group-density margin. Accept candidates in
    batches and permit later rounds to use only earlier high-confidence
    assignments.
-6. Defer `other`, `replotig`, missing, or unsupported dosage types by default.
-   They can be rejected as input errors or explicitly treated as haplotigs.
+6. Accept named or generic positive integer dosage labels up to the configured
+   ploidy. Defer `other`, `replotig`, missing, invalid, or over-ploidy dosage
+   types by default. They can be rejected as input errors or explicitly treated
+   as haplotigs, except that a known over-ploidy dosage is never silently valid.
 7. Validate exact dosage, immutable recluster results, one-chromosome group
    membership, and the complete assigned/unassigned partition before replacing
    output files.
@@ -76,7 +78,7 @@ python PHap.v2/utils/unchr_recluster.py \
   --full-links full_links.pkl \
   --recluster-dir 02.cluster.v2/04.recluster \
   --output-dir 02.cluster.v2/05.rescue \
-  --ploidy 4
+  --ploidy P
 ```
 
 The public `phap cluster` workflow runs the same rescue command automatically.

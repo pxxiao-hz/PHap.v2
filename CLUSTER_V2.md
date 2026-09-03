@@ -11,8 +11,9 @@ group. A unitig is not discarded because it has weak or absent Hi-C links.
 
 1. Read each chromosome FASTA once and retain only table unitigs for the seed
    clustering stage.
-2. Convert contig types to exact group dosage: haplotig 1, diplotig 2,
-   triplotig 3, and tetraplotig 4.
+2. Convert contig types to exact integer group dosage. Historical labels cover
+   haplotig 1 through hexaplotig 6; `dosage_N`, `copy_N`, and `Nx` support
+   arbitrary positive dosages up to the configured ploidy.
 3. Build a conflict graph from unitigs that co-occur in an allelic-table row.
 4. Detect conflict cliques whose summed dosage exceeds ploidy. In the default
    `weakest` mode, remove only the least-supported edge in each impossible
@@ -110,10 +111,11 @@ The clustering utility also exposes phase-block controls directly:
 
 | File | Meaning |
 | --- | --- |
-| `g1.fa` ... `g4.fa` | Legacy-compatible group FASTA files |
-| `g1.txt` ... `g4.txt` | Legacy-compatible unitig lists |
+| `g1.fa` ... `gP.fa` | Group FASTA files for configured ploidy P |
+| `g1.txt` ... `gP.txt` | Per-group unitig lists |
 | `group.cluster.txt` | Legacy group summary |
-| `g1g2g3g4.txt` / `.fa` | Legacy combined outputs |
+| `g1g2g3g4.txt` / `.fa` | Tetraploid-compatible combined outputs |
+| `all_groups.txt` / `.fa` | Combined outputs for non-tetraploid runs |
 | `cluster_assignments.tsv` | Per-unitig dosage, groups, Hi-C support, margin, and constraint degree |
 | `cluster_summary.json` | Inputs, parameters, group sizes, search/refinement metrics, and validation |
 | `cluster_constraint_violations.tsv` | Must contain only its header in an accepted run |
