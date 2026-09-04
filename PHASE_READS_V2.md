@@ -28,7 +28,8 @@ assigned mutually exclusively, and no Hi-C evidence SQLite is created. The
 older detailed Hi-C pair-evidence implementation remains available through
 `--hic-assignment-backend sqlite`.
 
-All 66 automated tests pass, including six-group dosage validation. Real
+All 71 automated tests pass, including no-collapse and six-group dosage
+validation. Real
 autotetraploid potato data have completed
 HiFi/ONT assignment, extraction, and hifiasm reassembly for all 48 groups;
 all 48 assemblies have also been evaluated with yak. Corrected fast-v1 Hi-C
@@ -150,6 +151,11 @@ interrupted evidence databases are retained there for checkpoint resume.
   outputs.
 - Comma-separated values are also accepted. `--groups` and `--chromosomes` are
   mutually exclusive.
+
+For a no-collapse clustering result, replace `--contig-type FILE` with
+`--no-collapse`. Every grouped unitig is then validated as single-copy and a
+group file containing the same unitig in multiple groups is rejected; the
+collapsed-read balancing fallback is not used.
 
 ### Scaffold-only mode
 

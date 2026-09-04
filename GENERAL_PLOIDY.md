@@ -50,6 +50,52 @@ configured ploidy plus half a copy is `replotig`.  Inspect the empirical depth
 histogram before choosing `--base-depth`; an incorrect peak directly corrupts
 all downstream dosage constraints.
 
+## No-collapse mode
+
+Use `--no-collapse` when the input assembly is known to contain no collapsed
+unitigs. `--contig_type` is then omitted, and every unitig is assigned dosage
+one throughout allelic-table generation, clustering, chromosome reassignment,
+rescue, and read phasing. Consequently, an assigned unitig can occur in
+exactly one haplotype group. `--no-collapse` and `--contig_type` are mutually
+exclusive.
+
+```shell
+python PHap.py cluster \
+  --p_utg p_utg.fa \
+  --mT2T mT2T.fa \
+  --full_links full_links.pkl \
+  --top_n 3 \
+  --chr_num 12 \
+  --no-collapse \
+  --output_dir 02.cluster.triploid.no_collapse
+```
+
+This is Hi-C-driven single-copy clustering with the existing mT2T chromosome
+placement and allelic mutual-exclusion constraints. Because every dosage is
+one, dosage-normalized Hi-C counts equal raw counts.
+
+The public workflow still runs `04.recluster` and `05.rescue`. In this mode
+they do not perform multi-group collapsed-unitig recovery: step 04 assigns
+chromosome-local unitigs omitted from the seed table, and step 05 attempts to
+place unitigs that lacked sequence-based chromosome placement. Keeping them
+prevents those sequences from disappearing from the final partition. Use
+`--stop_after cluster` only when an intentionally incomplete, seed-table-only
+result is desired.
+
+Read assignment must use the same contract:
+
+```shell
+python PHap.py phase_reads \
+  --group 02.cluster.triploid.no_collapse/05.rescue/group.reassignment.cluster.txt \
+  --no-collapse \
+  ...
+```
+
+The group file is rejected if any unitig occurs in more than one group. The
+collapsed-read balancing policy is therefore unused. If the assembly actually
+contains collapsed or duplicated sequence, forcing this mode can assign it to
+only one haplotype and bias both group content and read depth.
+
 ## Workflow
 
 ```shell

@@ -11,6 +11,11 @@ without allelic-table constraints.
 Uncertain unitigs are retained in explicit unassigned FASTA and TSV outputs.
 They are not silently deleted and are not guessed into a haplotype by default.
 
+Under public option `--no-collapse`, no dosage table is read and every unitig
+is restricted to one group. This stage is still needed to place chromosome-
+local unitigs absent from the initial allelic table; it does not perform
+multi-group collapsed-unitig recovery.
+
 ## Algorithm
 
 1. Validate every seed ID, its dosage, and its matching row in
@@ -51,6 +56,7 @@ They are not silently deleted and are not guessed into a haplotype by default.
 
 | Public option | Default | Meaning |
 | --- | ---: | --- |
+| `--no-collapse` | off | Omit `--contig_type` and restrict every unitig to one group |
 | `--hic_link_normalization` | `dosage` | Hi-C counts used by stages 03-05: dosage-corrected or `raw` |
 | `--recluster_min_adjusted_links` | 5.0 | Minimum adjusted support in selected groups |
 | `--recluster_min_group_margin` | 0.10 | Minimum density boundary margin |

@@ -50,7 +50,7 @@ class ReclusterTests(unittest.TestCase):
             pickle.dump(links, handle)
         return fasta, type_file, seeds, link_file
 
-    def run_recluster(self, work, extra=None, check=True):
+    def run_recluster(self, work, extra=None, check=True, no_collapse=False):
         fasta, types, seeds, links = self.make_inputs(work)
         output = work / "output"
         command = [
@@ -58,8 +58,6 @@ class ReclusterTests(unittest.TestCase):
             str(RECLUSTER),
             "--fasta",
             str(fasta),
-            "--contig-type",
-            str(types),
             "--full-links",
             str(links),
             "--clusters-file",
@@ -69,10 +67,27 @@ class ReclusterTests(unittest.TestCase):
             "--min-group-margin",
             "0.2",
         ]
+        if no_collapse:
+            command.append("--no-collapse")
+        else:
+            command.extend(["--contig-type", str(types)])
         if extra:
             command.extend(extra)
         result = subprocess.run(command, check=check, capture_output=True, text=True)
         return output, result
+
+    def test_no_collapse_assigns_each_unitig_to_at_most_one_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output, _ = self.run_recluster(
+                Path(temporary), no_collapse=True
+            )
+            with (output / "recluster_assignments.tsv").open() as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertTrue(all(row["dosage"] == "1" for row in rows))
+            self.assertTrue(all(int(row["group_count"]) <= 1 for row in rows))
+            summary = json.loads((output / "recluster_summary.json").read_text())
+            self.assertTrue(summary["parameters"]["no_collapse"])
+            self.assertIsNone(summary["inputs"]["contig_type"])
 
     def test_exact_dosage_propagation_and_audited_deferral(self):
         with tempfile.TemporaryDirectory() as temporary:

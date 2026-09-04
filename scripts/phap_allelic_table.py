@@ -123,8 +123,6 @@ def run_workflow(args):
         str(utils_dir / "allelic_table_generate_v2.py"),
         "--paf",
         str(chain_paf),
-        "--contig-type",
-        str(args.contig_type),
         "--output",
         str(table_path),
         "--projections",
@@ -190,6 +188,10 @@ def run_workflow(args):
         "--min-resolution-margin",
         str(args.min_resolution_margin),
     ]
+    if args.no_collapse:
+        table_command.append("--no-collapse")
+    else:
+        table_command.extend(["--contig-type", str(args.contig_type)])
     if args.gfa:
         table_command.extend(["--gfa", str(args.gfa)])
     subprocess.run(table_command, check=True)
@@ -220,7 +222,9 @@ def run_workflow(args):
         "inputs": {
             "p_utg": fingerprint(args.p_utg),
             "mt2t": fingerprint(args.mt2t),
-            "contig_type": fingerprint(args.contig_type),
+            "contig_type": (
+                fingerprint(args.contig_type) if args.contig_type else None
+            ),
             "paf": fingerprint(source_paf),
         },
         "outputs": {
@@ -259,7 +263,14 @@ def build_parser():
     )
     parser.add_argument("--p_utg", required=True, type=Path)
     parser.add_argument("--mT2T", dest="mt2t", required=True, type=Path)
-    parser.add_argument("--contig_type", required=True, type=Path)
+    parser.add_argument(
+        "--contig_type", type=Path,
+        help="Contig dosage table; omitted with --no-collapse",
+    )
+    parser.add_argument(
+        "--no-collapse", "--no_collapse", dest="no_collapse", action="store_true",
+        help="Treat every unitig as single-copy dosage one",
+    )
     parser.add_argument("--paf", type=Path, help="Reuse an explicitly supplied raw PAF")
     parser.add_argument("--gfa", type=Path, help="hifiasm GFA for graph-aware validation")
     parser.add_argument(
@@ -346,6 +357,10 @@ def build_parser():
 
 def main():
     args = build_parser().parse_args()
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig_type are mutually exclusive")
+    if not args.no_collapse and args.contig_type is None:
+        raise ValueError("--contig_type is required unless --no-collapse is used")
     run_workflow(args)
 
 

@@ -2,8 +2,8 @@
 
 > [!WARNING]
 > This branch is a **testing release**, not a stable production release.
-> All 66 automated tests pass, including synthetic triploid, pentaploid, and
-> hexaploid dosage paths. On autotetraploid potato, all 48 groups have
+> All 71 automated tests pass, including synthetic no-collapse, triploid,
+> pentaploid, and hexaploid paths. On autotetraploid potato, all 48 groups have
 > completed HiFi/ONT read assignment, extraction, reassembly, and yak
 > evaluation; Hi-C extraction is also complete for all 48 groups. HapHiC
 > scaffolding has been validated on two selected groups, but not yet on all 48.
@@ -24,7 +24,8 @@ species. It records the current validation boundary, required metadata, a
 small-scale testing strategy, and the files needed for a useful bug report.
 
 See [GENERAL_PLOIDY.md](GENERAL_PLOIDY.md) for dosage labels, depth
-classification, non-tetraploid commands, output naming, and required QC.
+classification, no-collapse mode, non-tetraploid commands, output naming, and
+required QC.
 
 See [UPGRADE_RECORD.md](UPGRADE_RECORD.md) for the consolidated Chinese record
 of code changes, retained and rejected algorithm experiments, current validation
@@ -81,6 +82,26 @@ Omit `--paf` to run minimap2. The primary result is
 unless `--gfa` is supplied. With `--gfa`, PHap also removes
 direct graph-link conflicts and writes `allelic_pairs.gfa_validation.tsv` plus
 its JSON summary. The no-sequence hifiasm GFA is sufficient for this check.
+
+If the assembly is known not to contain collapsed unitigs, omit the dosage
+table and use single-copy mode:
+
+```shell
+python PHap.py cluster \
+  --p_utg p_utg.fa \
+  --mT2T mT2T.fa \
+  --full_links full_links.pkl \
+  --top_n 4 \
+  --chr_num 12 \
+  --no-collapse \
+  --output_dir 02.cluster.no_collapse
+```
+
+In this mode every unitig has dosage one and may occur in at most one final
+group. Steps 04 and 05 remain enabled because they place unitigs absent from
+the initial table; they do not restore a unitig into multiple haplotype groups.
+See [GENERAL_PLOIDY.md](GENERAL_PLOIDY.md#no-collapse-mode) for the exact
+contract and limitations.
 
 Run the complete workflow only through initial clustering with:
 

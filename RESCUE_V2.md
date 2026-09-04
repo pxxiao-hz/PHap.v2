@@ -11,6 +11,11 @@ must not be reconsidered against all chromosomes, because cross-chromosome
 Hi-C noise could otherwise move it away from its sequence-supported
 chromosome.
 
+Under public option `--no-collapse`, every candidate is treated as dosage one
+and can enter at most one chromosome group. This step remains useful for
+Hi-C-based placement of `un_chr.fa`; it never restores a candidate into
+multiple haplotype groups.
+
 ## Algorithm
 
 1. Load all `04.recluster/chr*/recluster_assignments.tsv` files and verify
@@ -41,6 +46,7 @@ chromosome.
 
 | Public option | Default | Meaning |
 | --- | ---: | --- |
+| `--no-collapse` | off | Omit `--contig_type` and restrict every rescue candidate to one group |
 | `--hic_link_normalization` | `dosage` | Hi-C counts used by stages 03-05: dosage-corrected or `raw` |
 | `--rescue_min_adjusted_links` | 5.0 | Minimum adjusted support in selected groups |
 | `--rescue_min_chromosome_margin` | 0.10 | Minimum best-vs-second chromosome density margin |
@@ -80,6 +86,9 @@ python PHap.v2/utils/unchr_recluster.py \
   --output-dir 02.cluster.v2/05.rescue \
   --ploidy P
 ```
+
+For a no-collapse assembly, replace `--contig-type contig_depth.txt` with
+`--no-collapse`.
 
 The public `phap cluster` workflow runs the same rescue command automatically.
 

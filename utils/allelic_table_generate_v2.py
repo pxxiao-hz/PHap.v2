@@ -445,7 +445,7 @@ def build_projections(records, metrics, contig_types, args):
     fragmented_unitigs = 0
 
     for (target, unitig), alignments in sorted(records.items()):
-        raw_type = contig_types.get(unitig, "unknown")
+        raw_type = "haplotig" if args.no_collapse else contig_types.get(unitig, "unknown")
         parsed_dosage = dosage_from_contig_type(raw_type)
         if parsed_dosage is not None and parsed_dosage > args.ploidy:
             rejected.append((target, unitig, "dosage_exceeds_ploidy", raw_type))
@@ -1146,6 +1146,7 @@ def write_outputs(
         "status_counts": dict(Counter(row["status"] for row in qc_rows)),
         "parameters": {
             "ploidy": args.ploidy,
+            "no_collapse": args.no_collapse,
             "max_projection_gap": args.max_projection_gap,
             "max_projection_blocks": args.max_projection_blocks,
             "min_projection_aligned_bp": args.min_projection_aligned_bp,
@@ -1185,7 +1186,12 @@ def build_parser():
         description="Generate a dosage-aware allelic table from interval overlap."
     )
     parser.add_argument("--paf", required=True, type=Path)
-    parser.add_argument("--contig-type", required=True, type=Path)
+    parser.add_argument("--contig-type", type=Path)
+    parser.add_argument(
+        "--no-collapse",
+        action="store_true",
+        help="Treat every unitig as single-copy dosage one; --contig-type is not required",
+    )
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--projections", required=True, type=Path)
     parser.add_argument("--qc", required=True, type=Path)
@@ -1247,6 +1253,10 @@ def main():
     args = build_parser().parse_args()
     if args.ploidy < 2:
         raise ValueError("--ploidy must be at least two")
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig-type are mutually exclusive")
+    if not args.no_collapse and args.contig_type is None:
+        raise ValueError("--contig-type is required unless --no-collapse is used")
     if args.min_over_capacity_pair_overlap < 0:
         raise ValueError("--min-over-capacity-pair-overlap must be non-negative")
     if not 0 <= args.min_over_capacity_pair_short_coverage <= 1:
@@ -1263,7 +1273,7 @@ def main():
         raise ValueError(
             "--max-deferred-over-capacity-preferred-fraction must be between zero and one"
         )
-    contig_types = parse_contig_types(args.contig_type)
+    contig_types = {} if args.no_collapse else parse_contig_types(args.contig_type)
     gfa_links = parse_gfa_links(args.gfa)
     args.gfa_direct_links = len(gfa_links)
     records, metrics = parse_chain_paf(args.paf)

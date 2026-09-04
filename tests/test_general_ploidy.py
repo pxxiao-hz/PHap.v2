@@ -47,6 +47,77 @@ class GeneralPloidyTests(unittest.TestCase):
         self.assertEqual(module.classify_contig_normal(120, 20, 6), "hexaplotig")
         self.assertEqual(module.classify_contig_normal(140, 20, 6), "replotig")
 
+    def test_no_collapse_cluster_needs_no_contig_type_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            names = ["A", "B", "C", "X"]
+            fasta = work / "chr1.fa"
+            fasta.write_text(
+                "".join(f">{name}\n" + "GATC" * 5 + "\n" for name in names)
+            )
+            table = work / "table.tsv"
+            table.write_text(
+                "chr1\t0\t100\tA\tB\tC\n"
+                "chr1\t100\t200\tX\n"
+            )
+            links = work / "links.pkl"
+            with links.open("wb") as handle:
+                pickle.dump({("A", "X"): 100}, handle)
+            output = work / "cluster"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(UTILS / "cluster_allelic_unitigs_v2.py"),
+                    "--fasta", str(fasta),
+                    "--full-links", str(links),
+                    "--allelic-table", str(table),
+                    "--output-dir", str(output),
+                    "--ploidy", "3",
+                    "--no-collapse",
+                ],
+                check=True,
+            )
+            with (output / "cluster_assignments.tsv").open() as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertTrue(all(row["dosage"] == "1" for row in rows))
+            self.assertTrue(all(row["group_count"] == "1" for row in rows))
+            summary = json.loads((output / "cluster_summary.json").read_text())
+            self.assertTrue(summary["parameters"]["no_collapse"])
+            self.assertIsNone(summary["inputs"]["contig_type"])
+
+    def test_no_collapse_allelic_table_needs_no_contig_type_file(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            paf = work / "selected.paf"
+            paf.write_text(
+                "A\t100000\t0\t100000\t+\tchr1\t1000000\t0\t100000\t"
+                "98000\t100000\t60\ttp:A:P\n"
+            )
+            paths = {
+                "output": work / "table.tsv",
+                "projections": work / "projections.tsv",
+                "qc": work / "qc.tsv",
+                "rejected": work / "rejected.tsv",
+                "pairs": work / "pairs.tsv",
+                "summary": work / "summary.json",
+            }
+            command = [
+                sys.executable,
+                str(UTILS / "allelic_table_generate_v2.py"),
+                "--paf", str(paf),
+                "--ploidy", "3",
+                "--no-collapse",
+            ]
+            for option, path in paths.items():
+                command.extend([f"--{option}", str(path)])
+            subprocess.run(command, check=True)
+            with paths["projections"].open() as handle:
+                row = next(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual(row["contig_type"], "haplotig")
+            self.assertEqual(row["dosage"], "1")
+            summary = json.loads(paths["summary"].read_text())
+            self.assertTrue(summary["parameters"]["no_collapse"])
+
     def test_hexaploid_cluster_assigns_exact_high_dosages(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)

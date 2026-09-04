@@ -1976,7 +1976,9 @@ def write_outputs(
             "inputs": {
                 "fasta": str(args.fasta.resolve()),
                 "full_links": str(args.full_links.resolve()),
-                "contig_type": str(args.contig_type.resolve()),
+                "contig_type": (
+                    str(args.contig_type.resolve()) if args.contig_type else None
+                ),
                 "allelic_table": str(args.allelic_table.resolve()),
                 "allelic_pairs": (
                     str(args.allelic_pairs.resolve()) if args.allelic_pairs else None
@@ -1984,6 +1986,7 @@ def write_outputs(
             },
             "parameters": {
                 "ploidy": args.ploidy,
+                "no_collapse": args.no_collapse,
                 "flank": args.flank,
                 "hic_link_normalization": args.hic_link_normalization,
                 "balance_weight": args.balance_weight,
@@ -2172,7 +2175,15 @@ def run(args):
     output_directory.mkdir(parents=True, exist_ok=True)
 
     sequences = parse_fasta(args.fasta, args.flank)
-    contig_types = parse_contig_types(args.contig_type)
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig-type are mutually exclusive")
+    if not args.no_collapse and args.contig_type is None:
+        raise ValueError("--contig-type is required unless --no-collapse is used")
+    contig_types = (
+        {unitig: "haplotig" for unitig in sequences}
+        if args.no_collapse
+        else parse_contig_types(args.contig_type)
+    )
     (
         chromosome,
         rows,
@@ -2375,7 +2386,12 @@ def parse_arguments():
             "or use raw read-pair counts [dosage]"
         ),
     )
-    parser.add_argument("--contig-type", required=True, type=Path)
+    parser.add_argument("--contig-type", type=Path)
+    parser.add_argument(
+        "--no-collapse",
+        action="store_true",
+        help="Treat every unitig as single-copy dosage one; --contig-type is not required",
+    )
     parser.add_argument("--allelic-table", required=True, type=Path)
     parser.add_argument(
         "--allelic-pairs",

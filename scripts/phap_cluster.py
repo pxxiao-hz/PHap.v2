@@ -571,6 +571,7 @@ def cluster(
     protected_direct_short_overlap=0.20,
     hic_link_normalization='dosage',
     allelic_pairs_file=None,
+    no_collapse=False,
 ):
     cluster_script = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
@@ -583,7 +584,6 @@ def cluster(
         cluster_script,
         '--fasta', fasta,
         '--full-links', full_links,
-        '--contig-type', contig_type,
         '--allelic-table', allelic_table_file,
         '--output-dir', wd,
         '--ploidy', str(ploidy),
@@ -610,6 +610,10 @@ def cluster(
         '--protected-direct-short-overlap', str(protected_direct_short_overlap),
         '--hic-link-normalization', hic_link_normalization,
     ]
+    if no_collapse:
+        command.append('--no-collapse')
+    else:
+        command.extend(['--contig-type', contig_type])
     if allelic_pairs_file is not None:
         command.extend(['--allelic-pairs', allelic_pairs_file])
     if flank is not None:
@@ -627,7 +631,14 @@ def parse_arguments():
 
     parser.add_argument('--p_utg', required=True, type=str, help='Path to p_utg file')
     parser.add_argument('--mT2T', required=True, type=str, help='Path to mT2T file or reference genome')
-    parser.add_argument('--contig_type', required=True, type=str, help='Path to contig type from dosage analysis')
+    parser.add_argument(
+        '--contig_type', type=str,
+        help='Path to contig type from dosage analysis; omitted with --no-collapse'
+    )
+    parser.add_argument(
+        '--no-collapse', '--no_collapse', dest='no_collapse', action='store_true',
+        help='Assume every unitig is single-copy and disable multi-group collapsed-unitig recovery'
+    )
     parser.add_argument('--threads', type=int, default=10, help='The number of threads [10]')
     parser.add_argument('--paf', type=str, help='Reuse an existing raw p_utg vs mT2T PAF')
     parser.add_argument('--gfa', type=str, help='hifiasm GFA for graph-aware conflict filtering')
@@ -852,6 +863,10 @@ def main():
     args = parse_arguments()
     if args.top_n < 2:
         raise SystemExit('--top_n must be at least two')
+    if args.no_collapse and args.contig_type:
+        raise SystemExit('--no-collapse and --contig_type are mutually exclusive')
+    if not args.no_collapse and not args.contig_type:
+        raise SystemExit('--contig_type is required unless --no-collapse is used')
 
     script_realpath = os.path.dirname(os.path.realpath(__file__))
     utils_realpath = os.path.join(script_realpath, '..', 'utils')
@@ -917,7 +932,7 @@ def main():
 
         table_command = [
             sys.executable, os.path.join(utils_realpath, 'allelic_table_generate_v2.py'),
-            '--paf', best_paf_file, '--contig-type', args.contig_type,
+            '--paf', best_paf_file,
             '--output', allelic_table_file,
             '--projections', os.path.join(step1_dir, 'unitig_projections.tsv'),
             '--qc', os.path.join(step1_dir, 'allelic_table.qc.tsv'),
@@ -951,6 +966,10 @@ def main():
             '--over-capacity-policy', args.over_capacity_policy,
             '--min-resolution-margin', str(args.min_resolution_margin)
         ]
+        if args.no_collapse:
+            table_command.append('--no-collapse')
+        else:
+            table_command.extend(['--contig-type', args.contig_type])
         if args.gfa:
             table_command.extend(['--gfa', args.gfa])
         subprocess.run(table_command, check=True)
@@ -1044,6 +1063,7 @@ def main():
             protected_direct_short_overlap=args.cluster_protected_direct_short_overlap,
             hic_link_normalization=args.hic_link_normalization,
             allelic_pairs_file=allelic_pairs_chr,
+            no_collapse=args.no_collapse,
         )
         # cluster(args.p_utg, args.full_links, args.flank, args.contig_type, allelic_table_chr, cluster_chr_dir)
     os.chdir(cwd)
@@ -1065,7 +1085,6 @@ def main():
             sys.executable,
             os.path.join(utils_realpath, 'chr_uncluster_recluster.py'),
             '--fasta', file,
-            '--contig-type', args.contig_type,
             '--full-links', args.full_links,
             '--clusters-file', os.path.join(step3_dir, chr, 'group.cluster.txt'),
             '--allelic-table', os.path.join(
@@ -1094,6 +1113,10 @@ def main():
             '--unknown-dosage-policy', args.recluster_unknown_dosage_policy,
             '--reviewed-seed-fallback', args.recluster_reviewed_seed_fallback,
         ]
+        if args.no_collapse:
+            command.append('--no-collapse')
+        else:
+            command.extend(['--contig-type', args.contig_type])
         if args.recluster_seed_review == 'weak':
             command.extend([
                 '--cluster-assignments',
@@ -1131,7 +1154,6 @@ def main():
         os.path.join(utils_realpath, 'unchr_recluster.py'),
         '--assembly-fasta', args.p_utg,
         '--candidate-fasta', file_un_chr_fasta,
-        '--contig-type', args.contig_type,
         '--full-links', args.full_links,
         '--recluster-dir', step4_dir,
         '--output-dir', step5_dir,
@@ -1145,6 +1167,10 @@ def main():
         '--low-confidence-policy', args.rescue_low_confidence_policy,
         '--unknown-dosage-policy', args.rescue_unknown_dosage_policy,
     ]
+    if args.no_collapse:
+        rescue_command.append('--no-collapse')
+    else:
+        rescue_command.extend(['--contig-type', args.contig_type])
     if args.flank is not None:
         rescue_command.extend(['--flank', str(args.flank)])
     run_logged_command(

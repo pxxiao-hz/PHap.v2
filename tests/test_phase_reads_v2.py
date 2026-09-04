@@ -637,6 +637,37 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
                 (hifi_only / "01.assignments" / "ont.assignments.sqlite").exists()
             )
 
+    def test_public_workflow_no_collapse_needs_no_contig_type(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            groups = work / "groups.txt"
+            groups.write_text("chr1_group1\tA\nchr1_group2\tB\n")
+            hifi_bam = work / "hifi.bam"
+            self.write_bam(
+                hifi_bam,
+                [("h1", "A", 0), ("h2", "B", 0)],
+                1000,
+            )
+            output = work / "phase"
+            subprocess.run(
+                [
+                    sys.executable, str(PHASE_SCRIPT),
+                    "--bam-hifi", str(hifi_bam),
+                    "--group", str(groups),
+                    "--output-dir", str(output),
+                    "--data-types", "hifi",
+                    "--stop-after", "assign",
+                    "--no-collapse",
+                ],
+                check=True, capture_output=True, text=True,
+            )
+            summary = json.loads(
+                (output / "01.assignments" / "assignment_summary.json").read_text()
+            )
+            validation = summary["group_model"]["dosage_validation"]
+            self.assertEqual(validation["mode"], "single_copy")
+            self.assertEqual(validation["validated"], 2)
+
     def test_disk_evidence_checkpoint_resumes_from_bam_offset(self):
         model = self.make_model()
         with tempfile.TemporaryDirectory() as temporary:

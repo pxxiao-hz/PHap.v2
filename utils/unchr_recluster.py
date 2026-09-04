@@ -712,12 +712,15 @@ def write_outputs(
             "inputs": {
                 "assembly_fasta": str(args.assembly_fasta.resolve()),
                 "candidate_fasta": str(args.candidate_fasta.resolve()),
-                "contig_type": str(args.contig_type.resolve()),
+                "contig_type": (
+                    str(args.contig_type.resolve()) if args.contig_type else None
+                ),
                 "full_links": str(args.full_links.resolve()),
                 "recluster_directory": str(args.recluster_dir.resolve()),
             },
             "parameters": {
                 "ploidy": args.ploidy,
+                "no_collapse": args.no_collapse,
                 "motif": args.RE,
                 "flank": args.flank,
                 "hic_link_normalization": args.hic_link_normalization,
@@ -842,7 +845,15 @@ def run(args):
         raise ValueError(
             f"Rescue candidates already occur in recluster input: {sorted(overlap)[0]}"
         )
-    contig_types = parse_contig_types(args.contig_type)
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig-type are mutually exclusive")
+    if not args.no_collapse and args.contig_type is None:
+        raise ValueError("--contig-type is required unless --no-collapse is used")
+    contig_types = (
+        {unitig: "haplotig" for unitig in candidates}
+        if args.no_collapse
+        else parse_contig_types(args.contig_type)
+    )
     dosage, dosage_source, unsupported = candidate_dosages(
         candidates, contig_types, args.ploidy, args.unknown_dosage_policy
     )
@@ -893,7 +904,12 @@ def parse_arguments():
     )
     parser.add_argument("--assembly-fasta", "--draft_fasta", required=True, type=Path)
     parser.add_argument("--candidate-fasta", "--fasta", required=True, type=Path)
-    parser.add_argument("--contig-type", "--contig_type", required=True, type=Path)
+    parser.add_argument("--contig-type", "--contig_type", type=Path)
+    parser.add_argument(
+        "--no-collapse",
+        action="store_true",
+        help="Treat every rescue candidate as single-copy dosage one; --contig-type is not required",
+    )
     parser.add_argument("--full-links", "--full_links", required=True, type=Path)
     parser.add_argument(
         "--hic-link-normalization",

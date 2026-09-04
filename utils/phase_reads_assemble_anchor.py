@@ -91,6 +91,13 @@ def parse_args(argv=None):
         parser, "--contig-type", "--contig_type", type=Path
     )
     parser.add_argument(
+        "--no-collapse", "--no_collapse", dest="no_collapse", action="store_true",
+        help=(
+            "Assume every grouped unitig is single-copy; --contig-type is not "
+            "required and multi-group memberships are rejected"
+        ),
+    )
+    parser.add_argument(
         "--group",
         type=Path,
         default=Path("02.cluster.v2/05.rescue/group.reassignment.cluster.txt"),
@@ -304,9 +311,15 @@ def validate_args(args):
             "--assembly-dir and --hic-reads-dir require --scaffold-only"
         )
     args.data_types = list(dict.fromkeys(args.data_types))
-    if args.contig_type is None:
-        raise ValueError("--contig-type is required unless --scaffold-only is used")
-    required = [args.contig_type, args.group]
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig-type are mutually exclusive")
+    if args.contig_type is None and not args.no_collapse:
+        raise ValueError(
+            "--contig-type is required unless --no-collapse or --scaffold-only is used"
+        )
+    required = [args.group]
+    if args.contig_type is not None:
+        required.append(args.contig_type)
     for kind in args.data_types:
         value = getattr(args, f"bam_{kind}")
         if value is None:
@@ -559,7 +572,7 @@ def configuration(args):
                 "parameters": {
                     name: getattr(args, name)
                     for name in (
-                        "seed", "collapsed_policy", "unknown_contig_type_policy",
+                        "seed", "no_collapse", "collapsed_policy", "unknown_contig_type_policy",
                         "groups", "chromosomes",
                         "min_group_margin", "balanced_score_tolerance",
                         "hifi_min_alignment_length", "hifi_min_identity",
@@ -1465,10 +1478,16 @@ def run(args):
             previous.get("configuration", {}), config, completed
         )
     full_model = parse_group_file(args.group)
+    contig_types = (
+        {unitig: "haplotig" for unitig in full_model.unitig_groups}
+        if args.no_collapse
+        else parse_contig_types(args.contig_type)
+    )
     dosage_summary = validate_group_dosage(
-        full_model, parse_contig_types(args.contig_type),
+        full_model, contig_types,
         args.unknown_contig_type_policy,
     )
+    dosage_summary["mode"] = "single_copy" if args.no_collapse else "contig_type"
     model, output_model = select_group_models(full_model, args)
     LOGGER.info(
         "selection: %d analysis groups, %d output groups, chromosomes=%s",

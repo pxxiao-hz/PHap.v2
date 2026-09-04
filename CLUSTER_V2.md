@@ -6,6 +6,8 @@
 number of haplotype groups implied by its dosage. Allelic-table pairs are
 mutual-exclusion constraints: two enforced allelic unitigs may never share a
 group. A unitig is not discarded because it has weak or absent Hi-C links.
+With public option `--no-collapse`, the dosage table is omitted and every
+unitig has dosage one, so no unitig can be copied into multiple groups.
 
 ## Algorithm
 
@@ -66,6 +68,7 @@ when one haplotype is represented by an exceptionally long unitig.
 
 | Public option | Default | Meaning |
 | --- | ---: | --- |
+| `--no-collapse` | off | Omit `--contig_type` and treat every unitig as single-copy |
 | `--hic_link_normalization` | `dosage` | Hi-C counts used by stages 03-05: dosage-corrected or `raw` |
 | `--cluster_balance_weight` | 1.0 | Trade-off between Hi-C cohesion and seed bp balance |
 | `--cluster_refinement_rounds` | 10 | Maximum rounds for each refinement stage |

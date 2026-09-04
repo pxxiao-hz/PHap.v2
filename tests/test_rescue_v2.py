@@ -91,7 +91,7 @@ class RescueTests(unittest.TestCase):
             pickle.dump(links, handle)
         return assembly, candidate_fasta, types, link_file, recluster
 
-    def run_rescue(self, work, extra=None, check=True):
+    def run_rescue(self, work, extra=None, check=True, no_collapse=False):
         assembly, candidates, types, links, recluster = self.make_inputs(work)
         output = work / "05.rescue"
         command = [
@@ -99,17 +99,34 @@ class RescueTests(unittest.TestCase):
             str(RESCUE),
             "--assembly-fasta", str(assembly),
             "--candidate-fasta", str(candidates),
-            "--contig-type", str(types),
             "--full-links", str(links),
             "--recluster-dir", str(recluster),
             "--output-dir", str(output),
             "--min-chromosome-margin", "0.2",
             "--min-group-margin", "0.2",
         ]
+        if no_collapse:
+            command.append("--no-collapse")
+        else:
+            command.extend(["--contig-type", str(types)])
         if extra:
             command.extend(extra)
         result = subprocess.run(command, check=check, capture_output=True, text=True)
         return output, result
+
+    def test_no_collapse_rescues_candidates_as_single_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            output, _ = self.run_rescue(
+                Path(temporary), no_collapse=True
+            )
+            with (output / "rescue_assignments.tsv").open() as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            candidates = [row for row in rows if row["source"] == "rescue_candidate"]
+            self.assertTrue(all(row["dosage"] == "1" for row in candidates))
+            self.assertTrue(all(int(row["group_count"]) <= 1 for row in candidates))
+            summary = json.loads((output / "rescue_summary.json").read_text())
+            self.assertTrue(summary["parameters"]["no_collapse"])
+            self.assertIsNone(summary["inputs"]["contig_type"])
 
     def test_candidate_scope_exact_dosage_and_propagation(self):
         with tempfile.TemporaryDirectory() as temporary:

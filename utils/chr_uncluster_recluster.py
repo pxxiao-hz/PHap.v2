@@ -1127,7 +1127,9 @@ def write_outputs(
             "chromosome": chromosome,
             "inputs": {
                 "fasta": str(args.fasta.resolve()),
-                "contig_type": str(args.contig_type.resolve()),
+                "contig_type": (
+                    str(args.contig_type.resolve()) if args.contig_type else None
+                ),
                 "full_links": str(args.full_links.resolve()),
                 "clusters_file": str(args.clusters_file.resolve()),
                 "cluster_assignments": (
@@ -1144,6 +1146,7 @@ def write_outputs(
             },
             "parameters": {
                 "ploidy": args.ploidy,
+                "no_collapse": args.no_collapse,
                 "motif": args.RE,
                 "flank": args.flank,
                 "hic_link_normalization": args.hic_link_normalization,
@@ -1296,9 +1299,17 @@ def run(args):
     output_directory = args.output_dir.resolve()
     output_directory.mkdir(parents=True, exist_ok=True)
     records, order = parse_fasta(args.fasta, args.RE.upper(), args.flank)
-    contig_types, inferred_dosage = parse_contig_types(
-        args.contig_type, records, args.unknown_dosage_policy
-    )
+    if args.no_collapse and args.contig_type is not None:
+        raise ValueError("--no-collapse and --contig-type are mutually exclusive")
+    if not args.no_collapse and args.contig_type is None:
+        raise ValueError("--contig-type is required unless --no-collapse is used")
+    if args.no_collapse:
+        contig_types = {unitig: "haplotig" for unitig in records}
+        inferred_dosage = set()
+    else:
+        contig_types, inferred_dosage = parse_contig_types(
+            args.contig_type, records, args.unknown_dosage_policy
+        )
     args.inferred_dosage = inferred_dosage
     dosage = {
         unitig: dosage_from_contig_type(contig_types[unitig])
@@ -1387,7 +1398,12 @@ def run(args):
 def parse_arguments():
     parser = argparse.ArgumentParser(description="Dosage-aware PHap v2 chromosome unitig reassignment")
     parser.add_argument("--fasta", required=True, type=Path)
-    parser.add_argument("--contig-type", "--contig_type", required=True, type=Path)
+    parser.add_argument("--contig-type", "--contig_type", type=Path)
+    parser.add_argument(
+        "--no-collapse",
+        action="store_true",
+        help="Treat every unitig as single-copy dosage one; --contig-type is not required",
+    )
     parser.add_argument("--full-links", "--full_links", required=True, type=Path)
     parser.add_argument(
         "--hic-link-normalization",
