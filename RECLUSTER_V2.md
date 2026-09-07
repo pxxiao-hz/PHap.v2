@@ -6,7 +6,8 @@
 chromosome-assigned unitigs that were not used as high-confidence seeds.
 Only seeds whose cluster evidence passes the configured Hi-C thresholds are
 immutable. Other seeds are removed from the propagation anchors and rescored
-without allelic-table constraints.
+with chromosome Hi-C. Under conservative allelic-table mode, this rescoring
+also obeys every non-relaxed pairwise exclusion.
 
 Uncertain unitigs are retained in explicit unassigned FASTA and TSV outputs.
 They are not silently deleted and are not guessed into a haplotype by default.
@@ -20,8 +21,10 @@ multi-group collapsed-unitig recovery.
 
 1. Validate every seed ID, its dosage, and its matching row in
    `03.cluster/cluster_assignments.tsv`.
-2. Keep only trusted `hic_supported` seeds whose adjusted links, assigned-link
-   fraction, and group margin pass the recluster thresholds as fixed anchors.
+2. In legacy mode, keep trusted `hic_supported` seeds whose adjusted links,
+   assigned-link fraction, and group margin pass the recluster thresholds as
+   fixed anchors. Conservative mode instead promotes one best seed per group
+   and reviews the other preliminary seeds.
 3. Review all other seeds using chromosome Hi-C alone. A strong contradictory
    result changes the groups; an inconclusive result retains the original
    groups by default but is not allowed to propagate uncertainty.
@@ -38,19 +41,23 @@ multi-group collapsed-unitig recovery.
    the weakest selected and strongest unselected group.
 8. Accept candidates in batches, then repeat. A later round may use only the
    assignments accepted by earlier rounds, avoiding length-order dependence.
-9. Synchronously rescore every non-fixed unitig after propagation. Repeat four
-   times (equivalent to complete recluster runs 2 through 5), stopping early
-   when no group changes. Repeated states are detected and reported as an
-   oscillation instead of being silently accepted.
+9. Rescore every non-fixed unitig after propagation. Conservative mode applies
+   proposals sequentially against the global exclusion graph so one accepted
+   move cannot violate another row. Repeat four times, stopping early when no
+   group changes. Repeated states are detected and reported as an oscillation.
 10. Assign every full-dosage unitig to all configured groups even without Hi-C.
 11. Validate fixed-seed preservation, exact dosage, unique memberships, and the
    assigned/unassigned input partition before replacing outputs.
-12. Read chromosome-local allelic-table rows after Hi-C refinement. Treat
+12. In legacy mode, read chromosome-local allelic-table rows after Hi-C refinement. Treat
    trusted assignments as anchors and jointly enumerate dosage-exact,
    mutually-exclusive group configurations for weak members. Accept only a
    unique constraint-forced completion or a block-margin-supported best
    configuration. Pairs relaxed by `03.cluster` are excluded so a weak
    table edge is not silently restored.
+13. In conservative mode, build a global pairwise exclusion graph before
+   propagation, apply it during every assignment/refinement decision, skip the
+   legacy row-local mover, and reject any final non-relaxed pair that shares a
+   group.
 
 ## Defaults
 
@@ -70,7 +77,7 @@ multi-group collapsed-unitig recovery.
 | `--recluster_low_confidence_policy` | `defer` | Defer ambiguity or force best available groups |
 | `--recluster_unknown_dosage_policy` | `haplotig` | Auditably infer missing types or stop with `error` |
 | `--recluster_seed_review` | `weak` | Review weak/constraint-driven cluster seeds; `off` restores immutable legacy seeds |
-| `--recluster_trusted_seed_bases` | `hic_supported` | Cluster evidence bases eligible to become fixed anchors |
+| `--recluster_trusted_seed_bases` | mode-dependent | `hic_supported` in legacy mode; one promoted anchor per group in conservative mode |
 | `--recluster_reviewed_seed_fallback` | `retain` | Retain an original seed assignment when Hi-C review is inconclusive; `defer` removes it from final groups |
 
 The selected-link fraction is not filtered by default. A valid haplotig can

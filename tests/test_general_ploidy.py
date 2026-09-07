@@ -85,6 +85,41 @@ class GeneralPloidyTests(unittest.TestCase):
             self.assertTrue(summary["parameters"]["no_collapse"])
             self.assertIsNone(summary["inputs"]["contig_type"])
 
+    def test_no_collapse_can_cluster_fasta_unitigs_absent_from_table(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            fasta = work / "chr1.fa"
+            fasta.write_text(
+                "".join(f">{name}\n" + "GATC" * 5 + "\n" for name in "ABCD")
+            )
+            table = work / "table.tsv"
+            table.write_text("chr1\t0\t100\tA\tB\n")
+            links = work / "links.pkl"
+            with links.open("wb") as handle:
+                pickle.dump({("A", "C"): 100, ("B", "D"): 100}, handle)
+            output = work / "cluster"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(UTILS / "cluster_allelic_unitigs_v2.py"),
+                    "--fasta", str(fasta),
+                    "--full-links", str(links),
+                    "--allelic-table", str(table),
+                    "--output-dir", str(output),
+                    "--ploidy", "3",
+                    "--no-collapse",
+                    "--include-all-fasta-unitigs",
+                ],
+                check=True,
+            )
+            with (output / "cluster_assignments.tsv").open() as handle:
+                rows = list(csv.DictReader(handle, delimiter="\t"))
+            self.assertEqual({row["unitig"] for row in rows}, set("ABCD"))
+            summary = json.loads((output / "cluster_summary.json").read_text())
+            self.assertEqual(summary["table"]["row_unitigs"], 2)
+            self.assertEqual(summary["table"]["unitigs"], 4)
+            self.assertTrue(summary["parameters"]["include_all_fasta_unitigs"])
+
     def test_no_collapse_allelic_table_needs_no_contig_type_file(self):
         with tempfile.TemporaryDirectory() as temporary:
             work = Path(temporary)

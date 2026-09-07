@@ -351,6 +351,97 @@ class AllelicTableTests(unittest.TestCase):
             self.assertFalse(any(row["unitig"] == "I" for row in rejected))
             self.assertEqual(summary["fragmented_unitigs_above_qc_limit"], 1)
 
+    def test_conservative_mode_emits_only_strong_pairs_as_hard_constraints(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            work = Path(temporary_directory)
+            paf = work / "chain.paf"
+            contig_types = work / "contig_type.txt"
+            paf.write_text(
+                "\n".join(
+                    [
+                        paf_line("A", 100_000, 0, 100_000, "+", "chr1", 0, 100_000),
+                        paf_line("B", 100_000, 0, 100_000, "+", "chr1", 0, 100_000),
+                        paf_line("C", 100_000, 0, 40_000, "+", "chr1", 200_000, 240_000),
+                        paf_line("D", 100_000, 0, 40_000, "+", "chr1", 200_000, 240_000),
+                    ]
+                )
+                + "\n"
+            )
+            contig_types.write_text(
+                "contig_ID\tcontig_type\n"
+                "A\thaplotig\nB\thaplotig\nC\thaplotig\nD\thaplotig\n"
+            )
+            paths = self.run_table(
+                work,
+                paf,
+                contig_types,
+                extra_args=["--constraint-mode", "conservative", "--ploidy", "3"],
+            )
+
+            rows = [line.split("\t") for line in paths["output"].read_text().splitlines()]
+            self.assertTrue(any(set(row[3:]) == {"A", "B"} for row in rows))
+            self.assertFalse(any(set(row[3:]) == {"C", "D"} for row in rows))
+            self.assertEqual({unitig for row in rows for unitig in row[3:]}, set("AB"))
+
+            with paths["pairs"].open() as handle:
+                pairs = {
+                    frozenset((row["unitig1"], row["unitig2"])): row
+                    for row in csv.DictReader(handle, delimiter="\t")
+                }
+            self.assertEqual(pairs[frozenset(("A", "B"))]["constraint_class"], "hard")
+            self.assertEqual(pairs[frozenset(("C", "D"))]["constraint_class"], "soft")
+            summary = json.loads(paths["summary"].read_text())
+            self.assertEqual(summary["hard_constraint_pairs"], 1)
+            self.assertEqual(summary["parameters"]["constraint_mode"], "conservative")
+
+    def test_conservative_candidates_do_not_depend_on_legacy_capacity_subset(self):
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            work = Path(temporary_directory)
+            paf = work / "chain.paf"
+            contig_types = work / "contig_type.txt"
+            paf.write_text(
+                "\n".join(
+                    paf_line(
+                        unitig, 500_000, 0, 60_000, "+", "chr1", 0, 60_000
+                    )
+                    for unitig in "ABCD"
+                )
+                + "\n"
+            )
+            contig_types.write_text(
+                "contig_ID\tcontig_type\n"
+                "A\thaplotig\nB\thaplotig\nC\thaplotig\nD\thaplotig\n"
+            )
+            paths = self.run_table(
+                work,
+                paf,
+                contig_types,
+                extra_args=[
+                    "--constraint-mode", "conservative",
+                    "--ploidy", "3",
+                    "--over-capacity-policy", "best",
+                ],
+            )
+
+            with paths["pairs"].open() as handle:
+                hard_pairs = {
+                    frozenset((row["unitig1"], row["unitig2"]))
+                    for row in csv.DictReader(handle, delimiter="\t")
+                    if row["constraint_class"] == "hard"
+                }
+            self.assertEqual(len(hard_pairs), 6)
+            self.assertEqual(
+                hard_pairs,
+                {
+                    frozenset(pair)
+                    for pair in (("A", "B"), ("A", "C"), ("A", "D"),
+                                 ("B", "C"), ("B", "D"), ("C", "D"))
+                },
+            )
+            summary = json.loads(paths["summary"].read_text())
+            self.assertEqual(summary["hard_constraint_pairs"], 6)
+            self.assertEqual(summary["direct_pair_candidates"], 6)
+
     def test_fragmented_unitig_keeps_dominant_block_with_block_level_metrics(self):
         with tempfile.TemporaryDirectory() as temporary_directory:
             work = Path(temporary_directory)

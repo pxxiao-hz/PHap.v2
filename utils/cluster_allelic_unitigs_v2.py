@@ -1097,6 +1097,7 @@ class ConstraintClusterer:
         return {
             unitig: weighted_midpoints[unitig] / table_bp[unitig]
             for unitig in self.units
+            if table_bp[unitig] > 0
         }
 
     def refine_phase_blocks(
@@ -1987,6 +1988,7 @@ def write_outputs(
             "parameters": {
                 "ploidy": args.ploidy,
                 "no_collapse": args.no_collapse,
+                "include_all_fasta_unitigs": args.include_all_fasta_unitigs,
                 "flank": args.flank,
                 "hic_link_normalization": args.hic_link_normalization,
                 "balance_weight": args.balance_weight,
@@ -2014,6 +2016,9 @@ def write_outputs(
             "table": {
                 "rows": len(clusterer.rows),
                 "unitigs": len(table_units),
+                "row_unitigs": len(
+                    {unitig for row in clusterer.rows for unitig in row.unitigs}
+                ),
                 "original_conflict_pairs": sum(len(value) for value in original_adjacency.values()) // 2,
                 "enforced_conflict_pairs": sum(len(value) for value in enforced_adjacency.values()) // 2,
                 "relaxed_conflict_pairs": len(relaxed_constraints),
@@ -2127,6 +2132,8 @@ def run(args):
         raise ValueError("--ploidy must be at least two")
     if args.flank is not None and args.flank < 0:
         raise ValueError("--flank must be non-negative")
+    if args.include_all_fasta_unitigs and not args.no_collapse:
+        raise ValueError("--include-all-fasta-unitigs currently requires --no-collapse")
     if args.balance_weight < 0:
         raise ValueError("--balance-weight must be non-negative")
     if args.max_refinement_rounds < 0:
@@ -2199,6 +2206,12 @@ def run(args):
             f"{len(missing_fasta)} table unitigs are missing from chromosome FASTA: "
             + ", ".join(missing_fasta[:5])
         )
+    if args.include_all_fasta_unitigs:
+        table_units.update(sequences)
+        for unitig in table_units:
+            original_adjacency[unitig]
+            row_counts[unitig]
+            unit_table_bp[unitig]
     dosage = {
         unitig: dosage_from_contig_type(contig_types[unitig])
         for unitig in table_units
@@ -2391,6 +2404,14 @@ def parse_arguments():
         "--no-collapse",
         action="store_true",
         help="Treat every unitig as single-copy dosage one; --contig-type is not required",
+    )
+    parser.add_argument(
+        "--include-all-fasta-unitigs",
+        action="store_true",
+        help=(
+            "Cluster every chromosome-FASTA unitig, including unitigs absent "
+            "from allelic-table rows"
+        ),
     )
     parser.add_argument("--allelic-table", required=True, type=Path)
     parser.add_argument(

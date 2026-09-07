@@ -207,6 +207,7 @@ def parse_cluster_evidence(
                 "assigned_fraction": assigned_fraction,
                 "margin": margin,
                 "trusted": trusted,
+                "promoted_group_anchor": False,
             }
     missing_seeds = sorted(set(seed_assignments) - set(evidence))
     if missing_seeds:
@@ -214,6 +215,41 @@ def parse_cluster_evidence(
             f"Cluster evidence is missing {len(missing_seeds)} seed unitigs: {missing_seeds[0]}"
         )
     return evidence
+
+
+def promote_missing_group_anchors(seed_assignments, evidence, ploidy):
+    """Keep at least one immutable seed per group when weak seeds are reviewed."""
+    fixed_groups = {
+        group
+        for unitig, groups in seed_assignments.items()
+        if evidence[unitig]["trusted"]
+        for group in groups
+    }
+    promoted = []
+    for group in range(ploidy):
+        if group in fixed_groups:
+            continue
+        candidates = [
+            unitig
+            for unitig, groups in seed_assignments.items()
+            if group in groups
+        ]
+        if not candidates:
+            continue
+        unitig = max(
+            candidates,
+            key=lambda item: (
+                evidence[item]["margin"],
+                evidence[item]["assigned_fraction"],
+                evidence[item]["assigned_links"],
+                item,
+            ),
+        )
+        evidence[unitig]["trusted"] = True
+        evidence[unitig]["promoted_group_anchor"] = True
+        promoted.append(unitig)
+        fixed_groups.update(seed_assignments[unitig])
+    return promoted
 
 
 def load_relevant_links(path: Path, units, dosage, normalization="dosage"):
@@ -267,7 +303,8 @@ def group_re_sites(assignments, records, ploidy, exclude=None):
 
 
 def score_unitig(
-    unitig, assignments, neighbors, records, dosage, ploidy, forced_groups=None
+    unitig, assignments, neighbors, records, dosage, ploidy, forced_groups=None,
+    forbidden_groups=(),
 ):
     group_links = [0.0] * ploidy
     for neighbor, count in neighbors.get(unitig, {}).items():
@@ -275,18 +312,28 @@ def score_unitig(
             group_links[group] += count
     re_totals = group_re_sites(assignments, records, ploidy, exclude=unitig)
     densities = [group_links[group] / max(re_totals[group], 1) for group in range(ploidy)]
-    ranked = sorted(range(ploidy), key=lambda group: (-densities[group], group))
-    selected = (
-        tuple(sorted(forced_groups))
-        if forced_groups is not None
-        else tuple(sorted(ranked[: dosage[unitig]]))
+    forbidden_groups = set(forbidden_groups)
+    ranked = sorted(
+        (group for group in range(ploidy) if group not in forbidden_groups),
+        key=lambda group: (-densities[group], group),
     )
+    constraint_blocked = len(ranked) < dosage[unitig]
+    if forced_groups is not None:
+        selected = tuple(sorted(forced_groups))
+        constraint_blocked = bool(set(selected) & forbidden_groups)
+    elif constraint_blocked:
+        selected = ()
+    else:
+        selected = tuple(sorted(ranked[: dosage[unitig]]))
     selected_links = sum(group_links[group] for group in selected)
     total_links = sum(group_links)
     selected_fraction = selected_links / total_links if total_links else 0.0
     weakest_group = min(selected, key=lambda group: (densities[group], group), default=None)
     weakest_selected = densities[weakest_group] if weakest_group is not None else 0.0
-    unselected = [group for group in range(ploidy) if group not in selected]
+    unselected = [
+        group for group in range(ploidy)
+        if group not in selected and group not in forbidden_groups
+    ]
     strongest_group = max(
         unselected, key=lambda group: (densities[group], -group), default=None
     )
@@ -311,12 +358,16 @@ def score_unitig(
         "weakest_selected_density": weakest_selected,
         "weakest_selected_group": weakest_group,
         "strongest_unselected_group": strongest_group,
+        "forbidden_groups": tuple(sorted(forbidden_groups)),
+        "constraint_blocked": constraint_blocked,
     }
 
 
 def decision_reason(
     metrics, min_links, min_margin, min_fraction
 ):
+    if metrics.get("constraint_blocked"):
+        return "allelic_constraint_blocked"
     if metrics["total_links"] <= 0:
         return "no_assigned_hic"
     if metrics["selected_links"] < min_links:
@@ -333,8 +384,21 @@ def decision_reason(
 def assign_nonseed_unitigs(
     records, fixed_seed_assignments, original_seed_assignments, neighbors, dosage,
     ploidy, min_links, min_margin, min_fraction, max_rounds, low_confidence_policy,
-    reviewed_seed_fallback,
+    reviewed_seed_fallback, allelic_conflicts=None,
 ):
+    allelic_conflicts = allelic_conflicts or {}
+
+    def score(unitig, current_assignments):
+        forbidden = {
+            group
+            for neighbor in allelic_conflicts.get(unitig, ())
+            for group in current_assignments.get(neighbor, ())
+        }
+        return score_unitig(
+            unitig, current_assignments, neighbors, records, dosage, ploidy,
+            forbidden_groups=forbidden,
+        )
+
     assignments = dict(fixed_seed_assignments)
     reviewed_seeds = set(original_seed_assignments) - set(fixed_seed_assignments)
     decisions = {
@@ -357,12 +421,17 @@ def assign_nonseed_unitigs(
     for round_number in range(1, max_rounds + 1):
         accepted = []
         for unitig in sorted(pending, key=lambda item: (-records[item]["length"], item)):
-            metrics = score_unitig(unitig, assignments, neighbors, records, dosage, ploidy)
+            metrics = score(unitig, assignments)
             if decision_reason(metrics, min_links, min_margin, min_fraction) == "accepted":
                 accepted.append((unitig, metrics))
         if not accepted:
             break
+        committed = 0
         for unitig, metrics in accepted:
+            if allelic_conflicts:
+                metrics = score(unitig, assignments)
+                if decision_reason(metrics, min_links, min_margin, min_fraction) != "accepted":
+                    continue
             assignments[unitig] = metrics["groups"]
             decisions[unitig] = {
                 "round": round_number,
@@ -373,19 +442,31 @@ def assign_nonseed_unitigs(
                 "metrics": metrics,
             }
             pending.remove(unitig)
-        round_counts.append(len(accepted))
+            committed += 1
+        if not committed:
+            break
+        round_counts.append(committed)
 
     if low_confidence_policy == "best":
         low_round = max_rounds + 1
         while True:
             accepted = []
             for unitig in sorted(pending, key=lambda item: (-records[item]["length"], item)):
-                metrics = score_unitig(unitig, assignments, neighbors, records, dosage, ploidy)
+                metrics = score(unitig, assignments)
                 if metrics["selected_links"] >= min_links and metrics["weakest_selected_density"] > 0:
                     accepted.append((unitig, metrics))
             if not accepted:
                 break
+            committed = 0
             for unitig, metrics in accepted:
+                if allelic_conflicts:
+                    metrics = score(unitig, assignments)
+                    if not (
+                        metrics["selected_links"] >= min_links
+                        and metrics["weakest_selected_density"] > 0
+                        and not metrics["constraint_blocked"]
+                    ):
+                        continue
                 assignments[unitig] = metrics["groups"]
                 decisions[unitig] = {
                     "round": low_round,
@@ -396,15 +477,22 @@ def assign_nonseed_unitigs(
                     "metrics": metrics,
                 }
                 pending.remove(unitig)
-            round_counts.append(len(accepted))
+                committed += 1
+            if not committed:
+                break
+            round_counts.append(committed)
             low_round += 1
 
     for unitig in sorted(pending):
-        metrics = score_unitig(unitig, assignments, neighbors, records, dosage, ploidy)
+        metrics = score(unitig, assignments)
         basis = decision_reason(metrics, min_links, min_margin, min_fraction)
         if unitig in reviewed_seeds:
-            if reviewed_seed_fallback == "retain":
-                assignments[unitig] = original_seed_assignments[unitig]
+            original_groups = original_seed_assignments[unitig]
+            if (
+                reviewed_seed_fallback == "retain"
+                and not (set(original_groups) & set(metrics["forbidden_groups"]))
+            ):
+                assignments[unitig] = original_groups
                 basis = f"reviewed_seed_retained_{basis}"
             else:
                 basis = f"reviewed_seed_{basis}"
@@ -472,6 +560,16 @@ def parse_allelic_blocks(path: Path, records, relaxed_pairs=None):
                 }
             )
     return blocks
+
+
+def build_allelic_conflicts(blocks):
+    """Build the pairwise exclusion graph represented by strict table rows."""
+    conflicts = defaultdict(set)
+    for block in blocks:
+        for unitig1, unitig2 in itertools.combinations(block["unitigs"], 2):
+            conflicts[unitig1].add(unitig2)
+            conflicts[unitig2].add(unitig1)
+    return {unitig: set(neighbors) for unitig, neighbors in conflicts.items()}
 
 
 def enumerate_block_configurations(
@@ -706,7 +804,9 @@ def joint_reassign_allelic_blocks(
 def refine_assignments(
     records, assignments, decisions, fixed_seed_assignments, neighbors, dosage,
     ploidy, min_links, min_margin, min_fraction, max_rounds,
+    allelic_conflicts=None,
 ):
+    allelic_conflicts = allelic_conflicts or {}
     assignments = dict(assignments)
     excluded_support = {
         unitig for unitig, decision in decisions.items()
@@ -728,8 +828,14 @@ def refine_assignments(
             set(records) - set(fixed_seed_assignments),
             key=lambda item: (-records[item]["length"], item),
         ):
+            forbidden = {
+                group
+                for neighbor in allelic_conflicts.get(unitig, ())
+                for group in support_assignments.get(neighbor, ())
+            }
             metrics = score_unitig(
-                unitig, support_assignments, neighbors, records, dosage, ploidy
+                unitig, support_assignments, neighbors, records, dosage, ploidy,
+                forbidden_groups=forbidden,
             )
             if decision_reason(metrics, min_links, min_margin, min_fraction) != "accepted":
                 continue
@@ -743,8 +849,34 @@ def refine_assignments(
             break
 
         candidate_assignments = dict(assignments)
-        for unitig, _, metrics in proposals:
+        applied_proposals = []
+        for unitig, old_groups, metrics in proposals:
+            if allelic_conflicts:
+                candidate_support = {
+                    item: groups for item, groups in candidate_assignments.items()
+                    if item != unitig and item not in excluded_support
+                }
+                forbidden = {
+                    group
+                    for neighbor in allelic_conflicts.get(unitig, ())
+                    for group in candidate_support.get(neighbor, ())
+                }
+                metrics = score_unitig(
+                    unitig, candidate_support, neighbors, records, dosage, ploidy,
+                    forbidden_groups=forbidden,
+                )
+                if (
+                    decision_reason(metrics, min_links, min_margin, min_fraction)
+                    != "accepted"
+                    or metrics["groups"] == old_groups
+                ):
+                    continue
             candidate_assignments[unitig] = metrics["groups"]
+            applied_proposals.append((unitig, old_groups, metrics))
+        if not applied_proposals:
+            change_counts.append(0)
+            stable = True
+            break
         signature = assignment_signature(candidate_assignments)
         if signature in seen:
             oscillation = True
@@ -752,8 +884,8 @@ def refine_assignments(
 
         assignments = candidate_assignments
         seen.add(signature)
-        change_counts.append(len(proposals))
-        for unitig, old_groups, metrics in proposals:
+        change_counts.append(len(applied_proposals))
+        for unitig, old_groups, metrics in applied_proposals:
             excluded_support.discard(unitig)
             reviewed_seed = decisions[unitig]["basis"].startswith("reviewed_seed_")
             decisions[unitig] = {
@@ -784,7 +916,7 @@ def refine_assignments(
 
 def validate(
     records, fixed_seed_assignments, assignments, dosage, block_events=(),
-    ploidy=4, min_group_bp_ratio=0.0,
+    ploidy=4, min_group_bp_ratio=0.0, strict_blocks=(),
 ):
     violations = []
     for unitig, groups in assignments.items():
@@ -806,6 +938,23 @@ def validate(
                 violations.append(
                     (
                         "allelic_block_conflict",
+                        f"{unitig1},{unitig2}",
+                        "disjoint",
+                        ",".join(str(group + 1) for group in sorted(shared)),
+                    )
+                )
+    seen_strict_pairs = set()
+    for block in strict_blocks:
+        for unitig1, unitig2 in itertools.combinations(block["unitigs"], 2):
+            pair = tuple(sorted((unitig1, unitig2)))
+            if pair in seen_strict_pairs:
+                continue
+            seen_strict_pairs.add(pair)
+            shared = set(assignments.get(unitig1, ())) & set(assignments.get(unitig2, ()))
+            if shared:
+                violations.append(
+                    (
+                        "strict_allelic_conflict",
                         f"{unitig1},{unitig2}",
                         "disjoint",
                         ",".join(str(group + 1) for group in sorted(shared)),
@@ -1165,11 +1314,17 @@ def write_outputs(
                 "unknown_dosage_policy": args.unknown_dosage_policy,
                 "reviewed_seed_fallback": args.reviewed_seed_fallback,
                 "trusted_seed_bases": sorted(args.trusted_seed_bases),
+                "enforce_allelic_constraints": args.enforce_allelic_constraints,
             },
             "inferred_haplotig_unitigs": len(args.inferred_dosage),
             "input": {"unitigs": len(records), "bp": input_bp},
             "seed": {"unitigs": len(original_seed_assignments), "bp": seed_bp},
             "fixed_seed": {"unitigs": len(fixed_seed_assignments), "bp": fixed_seed_bp},
+            "promoted_group_anchors": sorted(
+                unitig
+                for unitig, evidence in cluster_evidence.items()
+                if evidence.get("promoted_group_anchor")
+            ),
             "reviewed_seed": {
                 "unitigs": len(reviewed_seeds),
                 "bp": sum(records[unitig]["length"] for unitig in reviewed_seeds),
@@ -1215,6 +1370,10 @@ def write_outputs(
                 ),
                 "threshold_bp": args.max_allelic_block_movable_length,
             },
+            "allelic_constraints": {
+                "enabled": args.enforce_allelic_constraints,
+                "enforced_pairs": args.enforced_allelic_conflict_pairs,
+            },
             "assignment_basis_counts": dict(sorted(basis_counts.items())),
             "hic": {"raw_link_records": raw_link_records, "chromosome_relevant_pairs": relevant_pairs},
             "groups": groups_summary,
@@ -1237,6 +1396,9 @@ def write_outputs(
                 "changed_fixed_seeds": sum(item[0] == "seed_changed" for item in violations),
                 "allelic_block_conflicts": sum(
                     item[0] == "allelic_block_conflict" for item in violations
+                ),
+                "strict_allelic_conflicts": sum(
+                    item[0] == "strict_allelic_conflict" for item in violations
                 ),
                 "group_bp_imbalances": sum(
                     item[0] == "group_bp_imbalance" for item in violations
@@ -1330,6 +1492,10 @@ def run(args):
             args.min_adjusted_links, args.min_group_margin,
             args.min_assigned_fraction,
         )
+        if args.enforce_allelic_constraints:
+            promote_missing_group_anchors(
+                seed_assignments, cluster_evidence, args.ploidy
+            )
         fixed_seed_assignments = {
             unitig: groups for unitig, groups in seed_assignments.items()
             if cluster_evidence[unitig]["trusted"]
@@ -1344,10 +1510,25 @@ def run(args):
     neighbors, raw_link_records, relevant_pairs = load_relevant_links(
         args.full_links, records, dosage, args.hic_link_normalization
     )
+    relaxed_pairs = (
+        parse_relaxed_constraints(args.relaxed_constraints)
+        if args.relaxed_constraints else set()
+    )
+    blocks = (
+        parse_allelic_blocks(args.allelic_table, records, relaxed_pairs)
+        if args.allelic_table else []
+    )
+    allelic_conflicts = (
+        build_allelic_conflicts(blocks) if args.enforce_allelic_constraints else {}
+    )
+    args.enforced_allelic_conflict_pairs = (
+        sum(len(items) for items in allelic_conflicts.values()) // 2
+    )
     assignments, decisions, round_counts = assign_nonseed_unitigs(
         records, fixed_seed_assignments, seed_assignments, neighbors, dosage, args.ploidy,
         args.min_adjusted_links, args.min_group_margin, args.min_assigned_fraction,
         args.max_rounds, args.low_confidence_policy, args.reviewed_seed_fallback,
+        allelic_conflicts,
     )
     (
         assignments,
@@ -1359,26 +1540,34 @@ def run(args):
     ) = refine_assignments(
         records, assignments, decisions, fixed_seed_assignments, neighbors, dosage,
         args.ploidy, args.min_adjusted_links, args.min_group_margin,
-        args.min_assigned_fraction, args.refinement_rounds,
+        args.min_assigned_fraction, args.refinement_rounds, allelic_conflicts,
     )
-    relaxed_pairs = (
-        parse_relaxed_constraints(args.relaxed_constraints)
-        if args.relaxed_constraints else set()
-    )
-    blocks = (
-        parse_allelic_blocks(args.allelic_table, records, relaxed_pairs)
-        if args.allelic_table else []
-    )
-    assignments, decisions, block_events, block_protection_events = joint_reassign_allelic_blocks(
-        records, assignments, decisions, fixed_seed_assignments, neighbors,
-        dosage, blocks, args,
-    )
+    if args.enforce_allelic_constraints:
+        # The global exclusion graph is applied during initial assignment and
+        # refinement.  The legacy row-local mover can satisfy one row while
+        # violating another overlapping row, so it must not run in this mode.
+        block_events = []
+        block_protection_events = []
+    else:
+        (
+            assignments,
+            decisions,
+            block_events,
+            block_protection_events,
+        ) = joint_reassign_allelic_blocks(
+            records, assignments, decisions, fixed_seed_assignments, neighbors,
+            dosage, blocks, args,
+        )
     violations = validate(
         records, fixed_seed_assignments, assignments, dosage, block_events,
         args.ploidy, args.min_group_bp_ratio,
+        blocks if args.enforce_allelic_constraints else (),
     )
     if violations:
-        raise RuntimeError(f"Internal recluster validation failed with {len(violations)} violations")
+        detail = "; ".join("|".join(item) for item in violations[:5])
+        raise RuntimeError(
+            f"Internal recluster validation failed with {len(violations)} violations: {detail}"
+        )
     summary = write_outputs(
         output_directory, chromosome, records, order, contig_types, dosage,
         seed_assignments, fixed_seed_assignments, cluster_evidence, assignments,
@@ -1423,6 +1612,13 @@ def parse_arguments():
     parser.add_argument(
         "--relaxed-constraints", type=Path,
         help="03.cluster relaxed pairs that must not be reintroduced as strict block edges",
+    )
+    parser.add_argument(
+        "--enforce-allelic-constraints", action="store_true",
+        help=(
+            "Apply every non-relaxed allelic-table pair during Hi-C assignment and "
+            "validate the final partition"
+        ),
     )
     parser.add_argument("--output-dir", type=Path, default=Path("."))
     parser.add_argument("--ploidy", type=int, default=4)

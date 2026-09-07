@@ -67,12 +67,27 @@ python PHap.py cluster \
   --top_n 3 \
   --chr_num 12 \
   --no-collapse \
+  --allelic_constraint_mode conservative \
   --output_dir 02.cluster.triploid.no_collapse
 ```
 
 This is Hi-C-driven single-copy clustering with the existing mT2T chromosome
-placement and allelic mutual-exclusion constraints. Because every dosage is
-one, dosage-normalized Hi-C counts equal raw counts.
+placement and allelic mutual-exclusion constraints. In conservative mode,
+reference alignment is used only to propose pairwise same-locus exclusions.
+A pair becomes a hard edge only when accepted direct projection blocks overlap
+by at least 50 kb and cover at least 10% of the shorter query. Path envelopes
+and weaker direct overlaps remain auditable in `allelic_pairs.tsv` as `soft`
+evidence but do not constrain clustering. The thresholds can be changed with
+`--hard_min_direct_overlap_bp` and `--hard_min_short_query_fraction`.
+
+Stage 03 may explicitly relax a hard edge when it is globally impossible or
+strongly contradicted by Hi-C; relaxed pairs are recorded in
+`cluster_relaxed_constraints.tsv`. Stage 04 applies every remaining hard edge
+during Hi-C reassignment and validates that no retained pair shares a final
+group. Only one best seed per group is kept immutable by default in
+conservative mode, allowing the complete chromosome Hi-C network to correct
+the other preliminary seed assignments. Because every dosage is one,
+dosage-normalized Hi-C counts equal raw counts.
 
 The public workflow still runs `04.recluster` and `05.rescue`. In this mode
 they do not perform multi-group collapsed-unitig recovery: step 04 assigns
@@ -81,6 +96,11 @@ place unitigs that lacked sequence-based chromosome placement. Keeping them
 prevents those sequences from disappearing from the final partition. Use
 `--stop_after cluster` only when an intentionally incomplete, seed-table-only
 result is desired.
+
+Conservative mode is experimental. Review `constraint_class` and direct-overlap
+columns in `allelic_pairs.tsv`, all relaxed edges, final group bp, and
+`recluster_validation.tsv`. The legacy table remains the default when
+`--allelic_constraint_mode` is omitted.
 
 Read assignment must use the same contract:
 

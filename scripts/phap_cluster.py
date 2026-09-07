@@ -572,6 +572,7 @@ def cluster(
     hic_link_normalization='dosage',
     allelic_pairs_file=None,
     no_collapse=False,
+    include_all_fasta_unitigs=False,
 ):
     cluster_script = os.path.join(
         os.path.dirname(os.path.realpath(__file__)),
@@ -616,6 +617,8 @@ def cluster(
         command.extend(['--contig-type', contig_type])
     if allelic_pairs_file is not None:
         command.extend(['--allelic-pairs', allelic_pairs_file])
+    if include_all_fasta_unitigs:
+        command.append('--include-all-fasta-unitigs')
     if flank is not None:
         command.extend(['--flank', str(flank)])
     subprocess.run(command, check=True)
@@ -711,6 +714,23 @@ def parse_arguments():
     allelic_table.add_argument('--unknown_dosage_policy', choices=['exclude', 'haplotig'], default='exclude')
     allelic_table.add_argument('--over_capacity_policy', choices=['omit', 'confident', 'best'], default='confident')
     allelic_table.add_argument('--min_resolution_margin', type=float, default=0.10)
+    allelic_table.add_argument(
+        '--allelic_constraint_mode',
+        choices=['legacy', 'conservative'],
+        default='legacy',
+        help=(
+            'Use legacy interval cliques or conservative direct-overlap pair '
+            'constraints [legacy]'
+        ),
+    )
+    allelic_table.add_argument(
+        '--hard_min_direct_overlap_bp', type=int, default=50000,
+        help='Minimum cumulative direct overlap for a conservative hard pair [50000]'
+    )
+    allelic_table.add_argument(
+        '--hard_min_short_query_fraction', type=float, default=0.10,
+        help='Minimum direct overlap fraction of the shorter query [0.10]'
+    )
 
     chromosome_assignment = parser.add_argument_group('>>> Chromosome assignment')
     chromosome_assignment.add_argument(
@@ -816,8 +836,12 @@ def parse_arguments():
         help='Re-evaluate weak 03.cluster seeds with chromosome Hi-C, or keep every seed fixed [weak]'
     )
     recluster.add_argument(
-        '--recluster_trusted_seed_bases', default='hic_supported',
-        help='Comma-separated 03.cluster assignment bases retained as immutable anchors [hic_supported]'
+        '--recluster_trusted_seed_bases',
+        help=(
+            'Comma-separated 03.cluster assignment bases retained as immutable anchors; '
+            'defaults to hic_supported in legacy mode and one promoted anchor per group '
+            'in conservative mode'
+        )
     )
     recluster.add_argument(
         '--recluster_reviewed_seed_fallback', choices=['retain', 'defer'], default='retain',
@@ -964,7 +988,10 @@ def main():
             '--length-prior-scale', str(args.length_prior_scale),
             '--unknown-dosage-policy', args.unknown_dosage_policy,
             '--over-capacity-policy', args.over_capacity_policy,
-            '--min-resolution-margin', str(args.min_resolution_margin)
+            '--min-resolution-margin', str(args.min_resolution_margin),
+            '--constraint-mode', args.allelic_constraint_mode,
+            '--hard-min-direct-overlap-bp', str(args.hard_min_direct_overlap_bp),
+            '--hard-min-short-query-fraction', str(args.hard_min_short_query_fraction),
         ]
         if args.no_collapse:
             table_command.append('--no-collapse')
@@ -1117,11 +1144,20 @@ def main():
             command.append('--no-collapse')
         else:
             command.extend(['--contig-type', args.contig_type])
+        if args.allelic_constraint_mode == 'conservative':
+            command.append('--enforce-allelic-constraints')
         if args.recluster_seed_review == 'weak':
+            trusted_seed_bases = args.recluster_trusted_seed_bases
+            if trusted_seed_bases is None:
+                trusted_seed_bases = (
+                    'group_anchor_only'
+                    if args.allelic_constraint_mode == 'conservative'
+                    else 'hic_supported'
+                )
             command.extend([
                 '--cluster-assignments',
                 os.path.join(step3_dir, chr, 'cluster_assignments.tsv'),
-                '--trusted-seed-bases', args.recluster_trusted_seed_bases,
+                '--trusted-seed-bases', trusted_seed_bases,
             ])
         if args.flank is not None:
             command.extend(['--flank', str(args.flank)])

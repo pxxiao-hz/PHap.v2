@@ -2,7 +2,7 @@
 
 > [!WARNING]
 > This branch is a **testing release**, not a stable production release.
-> All 71 automated tests pass, including synthetic no-collapse, triploid,
+> All 75 automated tests pass, including synthetic no-collapse, triploid,
 > pentaploid, and hexaploid paths. On autotetraploid potato, all 48 groups have
 > completed HiFi/ONT read assignment, extraction, reassembly, and yak
 > evaluation; Hi-C extraction is also complete for all 48 groups. HapHiC
@@ -94,12 +94,16 @@ python PHap.py cluster \
   --top_n 4 \
   --chr_num 12 \
   --no-collapse \
+  --allelic_constraint_mode conservative \
   --output_dir 02.cluster.no_collapse
 ```
 
 In this mode every unitig has dosage one and may occur in at most one final
 group. Steps 04 and 05 remain enabled because they place unitigs absent from
 the initial table; they do not restore a unitig into multiple haplotype groups.
+The optional conservative mode turns only substantial direct reference
+overlaps into hard pairwise exclusions and lets full-chromosome Hi-C review all
+but one anchor per group. Omit it to retain legacy table behavior.
 See [GENERAL_PLOIDY.md](GENERAL_PLOIDY.md#no-collapse-mode) for the exact
 contract and limitations.
 

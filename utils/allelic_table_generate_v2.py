@@ -107,6 +107,25 @@ def intersection_length(intervals1, intervals2) -> int:
     return overlap_bp
 
 
+def intersection_intervals(intervals1, intervals2):
+    """Return union-aware half-open intersections between two interval sets."""
+    left = union_intervals(intervals1)
+    right = union_intervals(intervals2)
+    intersections = []
+    left_index = 0
+    right_index = 0
+    while left_index < len(left) and right_index < len(right):
+        start = max(left[left_index][0], right[right_index][0])
+        end = min(left[left_index][1], right[right_index][1])
+        if end > start:
+            intersections.append((start, end))
+        if left[left_index][1] < right[right_index][1]:
+            left_index += 1
+        else:
+            right_index += 1
+    return intersections
+
+
 def parse_contig_types(path: Path):
     contig_types = {}
     with path.open() as handle:
@@ -989,10 +1008,74 @@ def merge_adjacent_segments(segments):
     return merged
 
 
+def build_conservative_segments(projections, gfa_links, deferred, args):
+    """Convert interval evidence into conservative pairwise hard constraints.
+
+    Chromosome placement can tolerate sparse local alignments, whereas a hard
+    allelic constraint must represent substantial direct overlap.  Keep weak,
+    fragmented, and envelope-only relationships in the pairs sidecar, but do
+    not turn them into graph-coloring edges.
+    """
+    deferred = set(deferred)
+    direct_intervals = defaultdict(list)
+    query_lengths = {}
+    unitig_dosage = {}
+    for projection in projections:
+        if projection.unitig in deferred:
+            continue
+        query_lengths[projection.unitig] = projection.query_length
+        unitig_dosage[projection.unitig] = projection.dosage
+        key = (projection.target, projection.unitig)
+        if projection.constraint_role != "path_envelope":
+            direct_intervals[key].append((projection.start, projection.end))
+
+    units_by_target = defaultdict(set)
+    for target, unitig in direct_intervals:
+        units_by_target[target].add(unitig)
+
+    hard_segments = []
+    hard_pairs = set()
+    direct_pair_bp = {}
+    for target in sorted(units_by_target):
+        for left, right in combinations(sorted(units_by_target[target]), 2):
+            if tuple(sorted((left, right))) in gfa_links:
+                continue
+            if unitig_dosage[left] + unitig_dosage[right] > args.ploidy:
+                continue
+            intersections = intersection_intervals(
+                direct_intervals[(target, left)], direct_intervals[(target, right)]
+            )
+            direct_overlap_bp = interval_length(intersections)
+            if not direct_overlap_bp:
+                continue
+            direct_pair_bp[(target, left, right)] = direct_overlap_bp
+            left_length = query_lengths.get(left, 0)
+            right_length = query_lengths.get(right, 0)
+            short_fraction = max(
+                direct_overlap_bp / left_length if left_length else 0.0,
+                direct_overlap_bp / right_length if right_length else 0.0,
+            )
+            if (
+                direct_overlap_bp < args.hard_min_direct_overlap_bp
+                or short_fraction < args.hard_min_short_query_fraction
+            ):
+                continue
+            hard_pairs.add((target, left, right))
+            hard_segments.extend(
+                Segment(target, start, end, (left, right))
+                for start, end in intersections
+            )
+
+    return merge_adjacent_segments(hard_segments), hard_pairs, direct_pair_bp
+
+
 def write_outputs(
     projections,
     rejected,
     segments,
+    evidence_segments,
+    hard_pairs,
+    conservative_pair_bp,
     qc_rows,
     fragmented_unitigs,
     long_path_metrics,
@@ -1051,12 +1134,14 @@ def write_outputs(
 
     unitig_bp = Counter()
     pair_bp = Counter()
-    for segment in segments:
+    for segment in evidence_segments:
         length = segment.end - segment.start
         for unitig in segment.unitigs:
             unitig_bp[(segment.target, unitig)] += length
         for left, right in combinations(segment.unitigs, 2):
             pair_bp[(segment.target, left, right)] += length
+    for pair, overlap_bp in conservative_pair_bp.items():
+        pair_bp[pair] = max(pair_bp[pair], overlap_bp)
 
     # A path envelope is useful for recovering divergent long paths, but it is
     # inferred across gaps without accepted alignments.  Preserve the overlap
@@ -1087,11 +1172,16 @@ def write_outputs(
                 "direct_query_ratio1",
                 "direct_query_ratio2",
                 "evidence_class",
+                "constraint_class",
             ]
         )
         for (target, left, right), overlap_bp in sorted(pair_bp.items()):
-            left_bp = unitig_bp[(target, left)]
-            right_bp = unitig_bp[(target, right)]
+            left_bp = unitig_bp[(target, left)] or interval_length(
+                direct_intervals[(target, left)]
+            )
+            right_bp = unitig_bp[(target, right)] or interval_length(
+                direct_intervals[(target, right)]
+            )
             direct_overlap_bp = intersection_length(
                 direct_intervals[(target, left)],
                 direct_intervals[(target, right)],
@@ -1118,6 +1208,14 @@ def write_outputs(
                         if direct_overlap_bp
                         else "envelope_only"
                     ),
+                    (
+                        "hard"
+                        if args.constraint_mode == "conservative"
+                        and (target, left, right) in hard_pairs
+                        else "soft"
+                        if args.constraint_mode == "conservative"
+                        else "legacy"
+                    ),
                 ]
             )
 
@@ -1126,7 +1224,10 @@ def write_outputs(
         "rejected_projections": len(rejected),
         "atomic_segments": len(qc_rows),
         "table_rows": len(segments),
+        "evidence_table_rows": len(evidence_segments),
         "table_unitigs": len({u for segment in segments for u in segment.unitigs}),
+        "hard_constraint_pairs": len(hard_pairs),
+        "direct_pair_candidates": len(conservative_pair_bp),
         "projection_mode_counts": dict(Counter(p.placement_mode for p in projections)),
         "projection_class_counts": dict(
             Counter(p.projection_class for p in projections)
@@ -1147,6 +1248,9 @@ def write_outputs(
         "parameters": {
             "ploidy": args.ploidy,
             "no_collapse": args.no_collapse,
+            "constraint_mode": args.constraint_mode,
+            "hard_min_direct_overlap_bp": args.hard_min_direct_overlap_bp,
+            "hard_min_short_query_fraction": args.hard_min_short_query_fraction,
             "max_projection_gap": args.max_projection_gap,
             "max_projection_blocks": args.max_projection_blocks,
             "min_projection_aligned_bp": args.min_projection_aligned_bp,
@@ -1200,6 +1304,19 @@ def build_parser():
     parser.add_argument("--summary", required=True, type=Path)
     parser.add_argument("--gfa", type=Path, help="hifiasm GFA used to omit direct-link conflicts")
     parser.add_argument("--ploidy", type=int, default=4)
+    parser.add_argument(
+        "--constraint-mode",
+        choices=("legacy", "conservative"),
+        default="legacy",
+        help=(
+            "Write the legacy multi-unitig interval table, or conservative "
+            "pairwise hard constraints while retaining weaker evidence in --pairs"
+        ),
+    )
+    parser.add_argument("--hard-min-direct-overlap-bp", type=int, default=50000)
+    parser.add_argument(
+        "--hard-min-short-query-fraction", type=float, default=0.10
+    )
     parser.add_argument("--max-projection-gap", type=int, default=20000)
     parser.add_argument(
         "--max-projection-blocks",
@@ -1253,6 +1370,12 @@ def main():
     args = build_parser().parse_args()
     if args.ploidy < 2:
         raise ValueError("--ploidy must be at least two")
+    if args.hard_min_direct_overlap_bp < 0:
+        raise ValueError("--hard-min-direct-overlap-bp must be non-negative")
+    if not 0 <= args.hard_min_short_query_fraction <= 1:
+        raise ValueError(
+            "--hard-min-short-query-fraction must be between zero and one"
+        )
     if args.no_collapse and args.contig_type is not None:
         raise ValueError("--no-collapse and --contig-type are mutually exclusive")
     if not args.no_collapse and args.contig_type is None:
@@ -1294,10 +1417,20 @@ def main():
         segments, qc_rows, projections, gfa_links, deferred_unitigs, args
     )
     segments = merge_adjacent_segments(segments)
+    evidence_segments = segments
+    hard_pairs = set()
+    conservative_pair_bp = {}
+    if args.constraint_mode == "conservative":
+        segments, hard_pairs, conservative_pair_bp = build_conservative_segments(
+            projections, gfa_links, deferred_unitigs, args
+        )
     write_outputs(
         projections,
         rejected,
         segments,
+        evidence_segments,
+        hard_pairs,
+        conservative_pair_bp,
         qc_rows,
         fragmented_unitigs,
         long_path_metrics,

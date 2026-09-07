@@ -422,5 +422,65 @@ class ReclusterTests(unittest.TestCase):
             self.assertTrue(summary["refinement"]["stable"])
             self.assertEqual(summary["validation"]["violations"], 0)
 
+    def test_enforced_allelic_pair_blocks_reviewed_seed_from_partner_group(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            work = Path(temporary)
+            names = ["A", "B", "C", "D", "Q"]
+            fasta = work / "chr1.putg.fa"
+            fasta.write_text(
+                "".join(f">{name}\n" + "GATC" * 25 + "\n" for name in names)
+            )
+            seeds = work / "groups.txt"
+            seeds.write_text(
+                "group1\t2\tA Q\n"
+                "group2\t1\tB\n"
+                "group3\t1\tC\n"
+                "group4\t1\tD\n"
+            )
+            evidence = work / "cluster_assignments.tsv"
+            evidence.write_text(
+                "unitig\tgroups\tassignment_basis\tadjusted_assigned_hic_links\t"
+                "assigned_hic_fraction\thic_density_margin\n"
+                "A\t1\thic_supported\t100\t1\t1\n"
+                "B\t2\thic_supported\t100\t1\t1\n"
+                "C\t3\thic_supported\t100\t1\t1\n"
+                "D\t4\thic_supported\t100\t1\t1\n"
+                "Q\t1\tconstraint_only_no_hic\t0\t0\t0\n"
+            )
+            links = work / "links.pkl"
+            with links.open("wb") as handle:
+                pickle.dump({("Q", "B"): 100, ("Q", "C"): 50}, handle)
+            allelic = work / "allelic.txt"
+            allelic.write_text("chr1\t0\t100\tQ\tB\n")
+            relaxed = work / "relaxed.tsv"
+            relaxed.write_text("unitig1\tunitig2\n")
+            output = work / "output"
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(RECLUSTER),
+                    "--fasta", str(fasta),
+                    "--no-collapse",
+                    "--full-links", str(links),
+                    "--clusters-file", str(seeds),
+                    "--cluster-assignments", str(evidence),
+                    "--allelic-table", str(allelic),
+                    "--relaxed-constraints", str(relaxed),
+                    "--enforce-allelic-constraints",
+                    "--output-dir", str(output),
+                    "--min-group-margin", "0.2",
+                ],
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            with (output / "recluster_assignments.tsv").open() as handle:
+                rows = {row["unitig"]: row for row in csv.DictReader(handle, delimiter="\t")}
+            self.assertEqual(rows["B"]["groups"], "2")
+            self.assertEqual(rows["Q"]["groups"], "3")
+            summary = json.loads((output / "recluster_summary.json").read_text())
+            self.assertTrue(summary["parameters"]["enforce_allelic_constraints"])
+            self.assertEqual(summary["validation"]["violations"], 0)
+
 if __name__ == "__main__":
     unittest.main()
