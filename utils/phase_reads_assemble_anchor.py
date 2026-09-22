@@ -9,6 +9,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1259,6 +1260,46 @@ def gfa_to_fasta(gfa: Path, fasta: Path):
     return records
 
 
+def make_juicebox_script_relocatable(
+    script: Path, build_directory: Path, input_paths
+):
+    """Replace transient scaffold input paths with paths local to the result tree."""
+    text = script.read_text()
+    original = text
+    replacements = 0
+    for input_path in input_paths:
+        absolute = str(input_path)
+        relative = os.path.relpath(input_path, start=build_directory)
+        occurrences = text.count(absolute)
+        if occurrences:
+            text = text.replace(absolute, relative)
+            replacements += occurrences
+        stale_path = re.compile(
+            rf"(?<!\S)/\S*/{re.escape(input_path.parent.name)}/"
+            rf"{re.escape(input_path.name)}(?=\s|$)"
+        )
+        text, stale_replacements = stale_path.subn(relative, text)
+        replacements += stale_replacements
+
+    transient_prefix = str(build_directory.parents[1]) + os.sep
+    if transient_prefix in text:
+        raise RuntimeError(
+            f"HapHiC juicebox.sh retains a transient group path: {script}"
+        )
+    if text == original:
+        return replacements
+
+    temporary = script.parent / f".{script.name}.tmp.{os.getpid()}"
+    try:
+        temporary.write_text(text)
+        shutil.copymode(script, temporary)
+        os.replace(temporary, script)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+    return replacements
+
+
 def run_pipe(commands, cwd: Path, stderr_prefix: Path):
     processes = []
     stderr_handles = []
@@ -1306,12 +1347,28 @@ def run_scaffold_stage(
 
     def scaffold(group):
         complete = checkpoints / f"{group}.complete.json"
-        final_build = target / group / "02.haphic" / "04.build"
+        final_group = target / group
+        final_build = final_group / "02.haphic" / "04.build"
         if (
             reuse
             and checkpoint_complete(complete, [final_build])
             and directory_has_nonempty_file(final_build)
         ):
+            final_script = final_build / "juicebox.sh"
+            if final_script.exists():
+                replacements = make_juicebox_script_relocatable(
+                    final_script,
+                    final_build,
+                    (
+                        final_group / "01.hic_mapping" / f"{group}.p_ctg.fa",
+                        final_group / "01.hic_mapping" / "HiC.filtered.bam",
+                    ),
+                )
+                if replacements:
+                    LOGGER.info(
+                        "repaired %d stale juicebox path(s); group=%s",
+                        replacements, group,
+                    )
             LOGGER.info("scaffold checkpoint complete; skipped %s", group)
             return
 
@@ -1363,8 +1420,17 @@ def run_scaffold_stage(
                 raise RuntimeError(
                     f"HapHiC did not create nonempty outputs in 04.build for {group}"
                 )
+            script = build_directory / "juicebox.sh"
+            if script.exists():
+                replacements = make_juicebox_script_relocatable(
+                    script, build_directory, (fasta, filtered)
+                )
+                if replacements:
+                    LOGGER.info(
+                        "made %d juicebox path(s) relocatable; group=%s",
+                        replacements, group,
+                    )
             if args.run_juicebox:
-                script = build_directory / "juicebox.sh"
                 if not script.exists():
                     raise RuntimeError(f"HapHiC did not create juicebox.sh for {group}")
                 run_logged(

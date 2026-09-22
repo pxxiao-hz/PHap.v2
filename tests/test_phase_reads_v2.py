@@ -844,10 +844,15 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             )
             haphic = executable(
                 "haphic",
-                "import pathlib\n"
+                "import pathlib, sys\n"
                 "build = pathlib.Path('04.build')\n"
                 "build.mkdir()\n"
-                "(build / 'scaffolds.fa').write_text('>scaffold\\nACGT\\n')\n",
+                "(build / 'scaffolds.fa').write_text('>scaffold\\nACGT\\n')\n"
+                "(build / 'juicebox.sh').write_text(\n"
+                "    '#!/bin/bash\\n'\n"
+                "    f'test -s {sys.argv[2]}\\n'\n"
+                "    f'test -s {sys.argv[3]}\\n'\n"
+                ")\n",
             )
             output = work / "scaffold_run"
             temp_root = work / "temp"
@@ -871,6 +876,16 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             first = subprocess.run(
                 command, check=True, capture_output=True, text=True
             )
+            juicebox = (
+                output / "04.scaffold" / "chr1_group1"
+                / "02.haphic" / "04.build" / "juicebox.sh"
+            )
+            stale_group = temp_root / "old" / ".chr1_group1.temporary"
+            juicebox.write_text(
+                "#!/bin/bash\n"
+                f"test -s {stale_group}/01.hic_mapping/chr1_group1.p_ctg.fa\n"
+                f"test -s {stale_group}/01.hic_mapping/HiC.filtered.bam\n"
+            )
             second = subprocess.run(
                 command + ["--resume"],
                 check=True, capture_output=True, text=True,
@@ -893,6 +908,12 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
             )
             build_exists = build.exists()
             checkpoint_exists = checkpoint.exists()
+            juicebox_text = juicebox.read_text()
+            transient_paths_remain = str(temp_root.resolve()) in juicebox_text
+            juicebox_run = subprocess.run(
+                ["bash", str(juicebox)], cwd=juicebox.parent,
+                capture_output=True, text=True,
+            )
 
         self.assertIn("completed stages: scaffold", first.stdout)
         self.assertIn("completed stages: scaffold", second.stdout)
@@ -904,6 +925,11 @@ class PhaseReadsAssignmentTests(unittest.TestCase):
         )
         self.assertTrue(build_exists)
         self.assertTrue(checkpoint_exists)
+        self.assertFalse(transient_paths_remain)
+        self.assertIn("../../01.hic_mapping/chr1_group1.p_ctg.fa", juicebox_text)
+        self.assertIn("../../01.hic_mapping/HiC.filtered.bam", juicebox_text)
+        self.assertEqual(juicebox_run.returncode, 0, juicebox_run.stderr)
+        self.assertIn("repaired 2 stale juicebox path(s)", second.stderr)
         self.assertIn("checkpoint complete; skipped chr1_group1", second.stderr)
         self.assertNotEqual(changed_input.returncode, 0)
         self.assertIn(
